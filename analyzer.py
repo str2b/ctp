@@ -7,17 +7,8 @@ from scapy.layers.can import CAN
 from scapy.contrib.automotive.kwp import KWP
 from scapy.contrib.isotp import ISOTP, ISOTPSession
 
-try:
-    from scapy.contrib.automotive.bmw.definitions import (
-        Generic_specific_enum,
-        Generic_memoryTypeIdentifiers,
-    )
-except ImportError:
-    Generic_specific_enum = {}
-    Generic_memoryTypeIdentifiers = {}
 
-
-def parse_args():
+def setup_parser():
     parser = argparse.ArgumentParser(
         description="Python-based CAN Trace Analyzer using Scapy"
     )
@@ -29,59 +20,40 @@ def parse_args():
         help="Print verbose full-packet Scapy dissected output",
     )
     parser.add_argument(
-        "-t",
-        "--type",
-        choices=["generic", "bmw"],
-        default="generic",
-        help="Type of communication addressing (default: generic)",
-    )
-    parser.add_argument(
-        "-p",
-        "--print",
-        nargs="+",
-        choices=["raw", "isotp", "kwp"],
-        default=["kwp"],
-        help="Which layers to print output for (default: kwp)",
+        "-A",
+        "--addressing",
+        choices=["standard", "extended"],
+        default="standard",
+        help="Type of ISOTP addressing layer (default: standard)",
     )
     parser.add_argument(
         "-o", "--output", help="Optional output file to save logs to natively"
     )
     parser.add_argument(
-        "-d", "--defs", help="Optional JSON file defining custom service layouts to override Scapy"
+        "--hook",
+        help="Optional Python file defining protocol hooks (e.g. on_kwp_message)",
     )
-    return parser.parse_args()
-
+    return parser
 
 class TraceAnalyzer:
     def __init__(
         self,
         trace_file,
         verbose=False,
-        comm_type="generic",
-        print_layers=None,
-        defs_file=None,
+        addressing="standard",
         can_hook=None,
         isotp_hook=None,
         kwp_hook=None,
     ):
         self.trace_file = trace_file
         self.verbose = verbose
-        self.comm_type = comm_type.lower()
-        self.print_layers = print_layers if print_layers else ["kwp"]
-        self.can_hook = can_hook if can_hook else self.default_can_logger
-        self.isotp_hook = isotp_hook if isotp_hook else self.default_isotp_logger
-        self.kwp_hook = kwp_hook if kwp_hook else self.default_kwp_logger
+        self.addressing = addressing.lower()
+        self.can_hook = can_hook
+        self.isotp_hook = isotp_hook
+        self.kwp_hook = kwp_hook
         self.id_to_target = {}
         self.id_to_dir = {}
-        
-        self.custom_defs = {}
-        if defs_file:
-            try:
-                with open(defs_file, "r") as f:
-                    self.custom_defs = json.load(f)
-                print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
-            except Exception as e:
-                print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
+
 
     def get_can_packets(self):
         """Reads ASC file using python-can and converts to Scapy CAN packets."""
@@ -96,7 +68,7 @@ class TraceAnalyzer:
         can_packets = []
         for msg in reader:
             if not msg.is_error_frame and not msg.is_remote_frame:
-                if self.comm_type == "bmw":
+                if self.addressing == "extended":
                     if len(msg.data) >= 2:  # Must have at least Target + PCI
                         target_addr = msg.data[0]
                         source_addr = msg.arbitration_id & 0xFF
@@ -107,6 +79,8 @@ class TraceAnalyzer:
                         pkt.time = msg.timestamp
                         pkt.direction = "Rx" if msg.is_rx else "Tx"
                         can_packets.append(pkt)
+                        if self.can_hook:
+                            self.can_hook(pkt)
                 else:
                     # Generic standard CAN frame
                     self.id_to_dir[msg.arbitration_id] = "Rx" if msg.is_rx else "Tx"
@@ -114,36 +88,11 @@ class TraceAnalyzer:
                     pkt.time = msg.timestamp
                     pkt.direction = "Rx" if msg.is_rx else "Tx"
                     can_packets.append(pkt)
-                    if "raw" in self.print_layers:
+                    if self.can_hook:
                         self.can_hook(pkt)
 
         print(f"Loaded {len(can_packets)} standard CAN frames.", file=sys.stderr)
         return can_packets
-
-    def default_can_logger(self, can_pkt):
-        """Default hook for raw CAN packets."""
-        dir_flag = getattr(can_pkt, "direction", None)
-        if dir_flag is None or dir_flag == "??":
-            dir_flag = "??"
-        ts = can_pkt.time if hasattr(can_pkt, "time") else 0.0
-        print(
-            f"[{ts:15.6f}] {dir_flag:2} | CAN ID 0x{can_pkt.identifier:03X} | len={len(can_pkt.data)} | {can_pkt.data.hex()}"
-        )
-
-    def default_isotp_logger(self, isotp_pkt):
-        """Default hook for reassembled ISOTP fragments."""
-        dir_flag = getattr(isotp_pkt, "direction", None)
-        if dir_flag is None or dir_flag == "??":
-            dir_flag = self.id_to_dir.get(getattr(isotp_pkt, "rx_id", 0), "??")
-        ts = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
-        length = len(isotp_pkt.payload_bytes)
-        payload_hex = isotp_pkt.payload_bytes.hex()
-        # Truncate ISOTP print if it's too long
-        if len(payload_hex) > 64:
-            payload_hex = payload_hex[:64] + f"...(+{(len(payload_hex)-64)//2} bytes)"
-        print(
-            f"[{ts:15.6f}] {dir_flag:2} | ISOTP Length: {length:4} bytes | {payload_hex}"
-        )
 
     def parse_kwp_message(self, kwp_msg, isotp_pkt):
         """Extracts and formats KWP attributes into a dictionary for hooks to easily consume."""
@@ -161,19 +110,7 @@ class TraceAnalyzer:
         params_dict = {}
         if kwp_msg.payload:
             for k, v in kwp_msg.payload.fields.items():
-                if (
-                    self.comm_type == "bmw"
-                    and k in ("localIdentifier", "recordLocalIdentifier")
-                    and v in Generic_specific_enum
-                ):
-                    params_dict[k] = {"value": v, "name": Generic_specific_enum[v]}
-                elif (
-                    self.comm_type == "bmw"
-                    and k == "memoryType"
-                    and v in Generic_memoryTypeIdentifiers
-                ):
-                    params_dict[k] = {"value": v, "name": Generic_memoryTypeIdentifiers[v]}
-                elif isinstance(v, int):
+                if isinstance(v, int):
                     field_obj = kwp_msg.payload.get_field(k)
                     if field_obj:
                         repr_val = str(field_obj.i2repr(kwp_msg.payload, v))
@@ -210,152 +147,6 @@ class TraceAnalyzer:
             "params": params_dict,
         }
 
-    def parse_custom_payload(self, payload_bytes, isotp_pkt):
-        """Bypass Scapy and map payload exactly based on custom JSON definitions."""
-        if len(payload_bytes) < 1:
-            return None
-            
-        service_id = payload_bytes[0]
-        hex_key = f"0x{service_id:02X}"
-        str_key = str(service_id)
-        
-        services_dict = self.custom_defs.get("services", self.custom_defs)
-        
-        service_def = services_dict.get(hex_key) or services_dict.get(str_key)
-            
-        if not service_def:
-            return None
-            
-        service_name = service_def.get("name", f"CustomService_{hex_key}")
-        
-        args_layout = service_def.get("args") or {}
-        
-        payload_len_str = str(len(payload_bytes))
-        layout = args_layout.get(payload_len_str, args_layout.get("default", []))
-        
-        arb_id = getattr(isotp_pkt, "rx_id", 0)
-        src = arb_id & 0xFF
-        tgt = self.id_to_target.get(arb_id, 0xFF)
-        
-        params_dict = {}
-        offset = 1  
-        
-        for param in layout:
-            p_name = param.get("name", "unknown")
-            p_len = param.get("length", 1)
-            
-            if offset >= len(payload_bytes):
-                break
-                
-            if p_len == -1:
-                raw_val = payload_bytes[offset:]
-                offset = len(payload_bytes)
-            else:
-                raw_val = payload_bytes[offset:offset+p_len]
-                offset += p_len
-            
-            # If length is 1-8 bytes, parse as integer to allow enum lookup
-            if 0 < p_len <= 8:
-                int_val = int.from_bytes(raw_val, byteorder='big')
-                hex_val_str = f"0x{int_val:02X}"
-                str_val_str = str(int_val)
-                
-                # Check enum map for string resolution
-                enum_map = param.get("enum", {})
-                named_val = enum_map.get(hex_val_str) or enum_map.get(str_val_str)
-                
-                if named_val:
-                    params_dict[p_name] = {"value": int_val, "name": named_val}
-                else:
-                    if p_len == 1:
-                        params_dict[p_name] = int_val
-                    else:
-                        params_dict[p_name] = raw_val
-            else:
-                params_dict[p_name] = raw_val
-                
-        if offset < len(payload_bytes):
-            params_dict["trailing_payload"] = payload_bytes[offset:]
-            
-        return {
-            "src": src,
-            "tgt": tgt,
-            "service_hex": service_id,
-            "service_name": service_name,
-            "params": params_dict,
-        }
-
-    def default_kwp_logger(self, kwp_msg, parsed_info, isotp_pkt):
-        """Default hook called for each discovered KWP2000 message, printing maximum details."""
-        timestamp = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
-
-        # Recover exact original direction
-        dir_flag = getattr(isotp_pkt, "direction", None)
-        if dir_flag is None or dir_flag == "??":
-            dir_flag = self.id_to_dir.get(getattr(isotp_pkt, "rx_id", 0), "??")
-
-        if not self.verbose:
-            # Concise single-line output
-            formatted_params = []
-            for k, v in parsed_info["params"].items():
-                if isinstance(v, dict) and "name" in v and "value" in v:
-                    formatted_params.append(f"{k}=0x{v['value']:02X} {v['name']}")
-                elif isinstance(v, (bytes, bytearray)):
-                    formatted_params.append(
-                        f"{k}=" + " ".join([f"0x{b:02X}" for b in v])
-                    )
-                elif isinstance(v, int):
-                    formatted_params.append(f"{k}=0x{v:X}")
-                else:
-                    formatted_params.append(f"{k}={v}")
-
-            params_str = ", ".join(formatted_params)
-            print(
-                f"[{timestamp:10.4f}] [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X} | L:0x{len(isotp_pkt.payload_bytes):04X}] [0x{parsed_info['service_hex']:02X} {parsed_info['service_name'][:35]:<35} | {params_str}]"
-            )
-        else:
-            # Verbose multi-line output
-            arb_id = getattr(isotp_pkt, "rx_id", 0)
-            print(f"\n{'='*80}")
-            print(f"[{timestamp:.6f}] {dir_flag} | KWP2000 MESSAGE")
-            print(
-                f"Address: Source 0x{parsed_info['src']:02X} -> Target 0x{parsed_info['tgt']:02X} (CAN ID: 0x{arb_id:X})"
-            )
-            print(
-                f"Service: {parsed_info['service_name']} (0x{parsed_info['service_hex']:02X})"
-            )
-
-            # Print full Scapy dissected packet details
-            print("-" * 40)
-            kwp_msg.show()
-
-            # Enrich with KWP-specific knowledge
-            if self.comm_type == "bmw":
-                if hasattr(kwp_msg, "localIdentifier"):
-                    lid = kwp_msg.localIdentifier
-                    if lid in Generic_specific_enum:
-                        print(
-                            f"[*] Generic LocalIdentifier 0x{lid:02X}: {Generic_specific_enum[lid]}"
-                        )
-
-                if hasattr(kwp_msg, "recordLocalIdentifier"):
-                    lid = kwp_msg.recordLocalIdentifier
-                    if lid in Generic_specific_enum:
-                        print(
-                            f"[*] Generic RecordLocalIdentifier 0x{lid:02X}: {Generic_specific_enum[lid]}"
-                        )
-
-                if hasattr(kwp_msg, "memoryAddress"):
-                    if hasattr(kwp_msg, "memoryType"):
-                        mtype = kwp_msg.memoryType
-                        if mtype in Generic_memoryTypeIdentifiers:
-                            print(
-                                f"[*] Generic MemoryType 0x{mtype:02X}: {Generic_memoryTypeIdentifiers[mtype]}"
-                            )
-
-            if kwp_msg.payload:
-                print(f"Raw Underlayer: {bytes(kwp_msg.payload).hex()}")
-            print(f"{'='*80}\n")
 
     def analyze(self):
         # 1. Parse raw CAN messages
@@ -384,7 +175,7 @@ class TraceAnalyzer:
             # But we can recover the target address from self.id_to_target.
             tgt = self.id_to_target.get(arb_id, 0xFF)
 
-            if self.comm_type == "bmw":
+            if self.addressing == "extended":
                 session_key = (arb_id, tgt)
             else:
                 session_key = arb_id
@@ -438,7 +229,7 @@ class TraceAnalyzer:
                     self.payload_bytes = b""
 
             isotp_pkt = DummyISOTPPacket()
-            if self.comm_type == "bmw":
+            if self.addressing == "extended":
                 isotp_pkt.rx_id = session_key[0]
             else:
                 isotp_pkt.rx_id = session_key
@@ -447,53 +238,77 @@ class TraceAnalyzer:
             isotp_pkt.direction = getattr(final_cf_pkt, "direction", "??")
             isotp_pkt.payload_bytes = payload_bytes
 
-            if "isotp" in self.print_layers:
+            if self.isotp_hook:
                 self.isotp_hook(isotp_pkt)
 
-            if "kwp" in self.print_layers:
-                if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
-                    try:
-                        parsed_info = None
-                        kwp_msg = None
-                        
-                        if self.custom_defs:
-                            parsed_info = self.parse_custom_payload(payload_bytes, isotp_pkt)
-                            
-                        if parsed_info:
-                            # Successfully bypassed scapy! We pass Raw wrapper to hook in case they want bytes
-                            kwp_msg_count += 1
-                            kwp_msg = Raw(payload_bytes)
-                            self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
-                        else:
-                            # Fallback to Scapy logic
-                            kwp_msg = KWP(payload_bytes)
-                            _ = getattr(kwp_msg, "service", None)
+            if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
+                try:
+                    kwp_msg = KWP(payload_bytes)
+                    _ = getattr(kwp_msg, "service", None)
 
-                            if kwp_msg:
-                                kwp_msg_count += 1
-                                parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
-                                self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
-                    except Exception as e:
-                        pass
+                    if kwp_msg:
+                        kwp_msg_count += 1
+                        parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
+                        if self.kwp_hook:
+                            self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
+                except Exception as e:
+                    pass
 
         print(f"Found {kwp_msg_count} KWP2000 messages.", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    parser = setup_parser()
+    known_args, _ = parser.parse_known_args()
 
     out_file = None
-    if args.output:
-        out_file = open(args.output, "w", encoding="utf-8")
+    if known_args.output:
+        out_file = open(known_args.output, "w", encoding="utf-8")
         sys.stdout = out_file
+
+    can_hook = None
+    isotp_hook = None
+    kwp_hook = None
+    plugin_init = None
+
+    if known_args.hook:
+        import importlib.util
+        import os
+
+        hook_path = os.path.abspath(known_args.hook)
+        try:
+            spec = importlib.util.spec_from_file_location("plugin_hook", hook_path)
+            hook_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(hook_mod)
+            
+            # Allow plugin to register its own arguments
+            if hasattr(hook_mod, "add_arguments"):
+                hook_mod.add_arguments(parser)
+                
+            can_hook = getattr(hook_mod, "on_can_message", None)
+            isotp_hook = getattr(hook_mod, "on_isotp_message", None)
+            kwp_hook = getattr(hook_mod, "on_kwp_message", None)
+            plugin_init = getattr(hook_mod, "init", None)
+            
+            print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
+        except Exception as e:
+            print(f"Failed to load hook plugin {known_args.hook}: {e}", file=sys.stderr)
+
+    # Second pass: fully parse all args including those added by plugin
+    args = parser.parse_args()
+
+    # Give the plugin a chance to read its args
+    if plugin_init:
+        plugin_init(args)
 
     try:
         analyzer = TraceAnalyzer(
             args.trace_file,
             verbose=args.verbose,
-            comm_type=args.type,
-            print_layers=getattr(args, "print"),
-            defs_file=args.defs,
+            addressing=args.addressing,
+            can_hook=can_hook,
+            isotp_hook=isotp_hook,
+            kwp_hook=kwp_hook,
         )
         analyzer.analyze()
     finally:
