@@ -228,17 +228,10 @@ class TraceAnalyzer:
             
         service_name = service_def.get("name", f"CustomService_{hex_key}")
         
-        payload_len_str = str(len(payload_bytes))
+        args_layout = service_def.get("args") or {}
         
-        if "cases" in service_def:
-            if payload_len_str in service_def["cases"]:
-                layout = service_def["cases"][payload_len_str]
-            elif "default" in service_def["cases"]:
-                layout = service_def["cases"]["default"]
-            else:
-                layout = []
-        else:
-            layout = service_def.get("args", [])
+        payload_len_str = str(len(payload_bytes))
+        layout = args_layout.get(payload_len_str, args_layout.get("default", []))
         
         arb_id = getattr(isotp_pkt, "rx_id", 0)
         src = arb_id & 0xFF
