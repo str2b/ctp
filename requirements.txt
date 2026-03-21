@@ -1,0 +1,2 @@
+python-can>=4.3.0
+scapy>=2.5.0

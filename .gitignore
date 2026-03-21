@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+test_input/
+test_output/
+*.log
+*.asc
