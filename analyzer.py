@@ -1,7 +1,8 @@
 import argparse
 import sys
+import json
 import can
-from scapy.all import sniff
+from scapy.all import sniff, Raw
 from scapy.layers.can import CAN
 from scapy.contrib.automotive.kwp import KWP
 from scapy.contrib.isotp import ISOTP, ISOTPSession
@@ -45,6 +46,9 @@ def parse_args():
     parser.add_argument(
         "-o", "--output", help="Optional output file to save logs to natively"
     )
+    parser.add_argument(
+        "-d", "--defs", help="Optional JSON file defining custom service layouts to override Scapy"
+    )
     return parser.parse_args()
 
 
@@ -55,6 +59,7 @@ class TraceAnalyzer:
         verbose=False,
         comm_type="generic",
         print_layers=None,
+        defs_file=None,
         can_hook=None,
         isotp_hook=None,
         kwp_hook=None,
@@ -68,6 +73,15 @@ class TraceAnalyzer:
         self.kwp_hook = kwp_hook if kwp_hook else self.default_kwp_logger
         self.id_to_target = {}
         self.id_to_dir = {}
+        
+        self.custom_defs = {}
+        if defs_file:
+            try:
+                with open(defs_file, "r") as f:
+                    self.custom_defs = json.load(f)
+                print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
+            except Exception as e:
+                print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
 
     def get_can_packets(self):
         """Reads ASC file using python-can and converts to Scapy CAN packets."""
@@ -180,9 +194,7 @@ class TraceAnalyzer:
                     params_dict[k] = v
 
             # Always check for unparsed Raw trailing bytes deeper in the layer tree
-            if kwp_msg.haslayer("Raw"):
-                from scapy.packet import Raw
-
+            if kwp_msg.haslayer(Raw):
                 raw_bytes = getattr(kwp_msg.getlayer(Raw), "load", b"")
                 if raw_bytes:
                     if len(params_dict) == 0:
@@ -194,6 +206,85 @@ class TraceAnalyzer:
             "src": src,
             "tgt": tgt,
             "service_hex": service_hex,
+            "service_name": service_name,
+            "params": params_dict,
+        }
+
+    def parse_custom_payload(self, payload_bytes, isotp_pkt):
+        """Bypass Scapy and map payload exactly based on custom JSON definitions."""
+        if len(payload_bytes) < 1:
+            return None
+            
+        service_id = payload_bytes[0]
+        is_response = service_id >= 0x40
+        base_service_id = service_id - 0x40 if is_response else service_id
+        base_hex = f"0x{base_service_id:02X}"
+        
+        # We look up by base service ID (e.g. "0x1A" maps both 0x1A and 0x5A)
+        services_dict = self.custom_defs.get("services", {})
+        
+        # Try both the normalized hex string (0xXX) and integer mapping if they typed "26" 
+        service_def = services_dict.get(base_hex)
+        if not service_def:
+            service_def = services_dict.get(str(base_service_id))
+            
+        if not service_def:
+            return None
+            
+        service_name = service_def.get("name", f"CustomService_{base_hex}")
+        if is_response:
+            service_name += "PositiveResponse"
+            
+        layout = service_def.get("response" if is_response else "request", [])
+        
+        arb_id = getattr(isotp_pkt, "rx_id", 0)
+        src = arb_id & 0xFF
+        tgt = self.id_to_target.get(arb_id, 0xFF)
+        
+        params_dict = {}
+        offset = 1  
+        
+        for param in layout:
+            p_name = param.get("name", "unknown")
+            p_len = param.get("length", 1)
+            
+            if offset >= len(payload_bytes):
+                break
+                
+            if p_len == -1:
+                raw_val = payload_bytes[offset:]
+                offset = len(payload_bytes)
+            else:
+                raw_val = payload_bytes[offset:offset+p_len]
+                offset += p_len
+            
+            # If length is 1-8 bytes, parse as integer to allow enum lookup
+            if 0 < p_len <= 8:
+                int_val = int.from_bytes(raw_val, byteorder='big')
+                hex_key = f"0x{int_val:02X}"
+                str_key = str(int_val)
+                
+                # Check enum map for string resolution
+                enum_map = param.get("enum", {})
+                named_val = enum_map.get(hex_key) or enum_map.get(str_key)
+                
+                if named_val:
+                    params_dict[p_name] = {"value": int_val, "name": named_val}
+                else:
+                    if p_len == 1:
+                        params_dict[p_name] = int_val
+                    else:
+                        params_dict[p_name] = raw_val
+            else:
+                params_dict[p_name] = raw_val
+                
+        if offset < len(payload_bytes):
+            params_dict["trailing_payload"] = payload_bytes[offset:]
+            
+        return {
+            "src": src,
+            "tgt": tgt,
+            "service_hex": service_id,
             "service_name": service_name,
             "params": params_dict,
         }
@@ -224,7 +315,7 @@ class TraceAnalyzer:
 
             params_str = ", ".join(formatted_params)
             print(
-                f"[{timestamp:10.4f}] [{parsed_info['src']:02X}->{parsed_info['tgt']:02X} | len:{len(isotp_pkt.payload_bytes):04X}] [0x{parsed_info['service_hex']:02X} {parsed_info['service_name'][:35]:<35} | {params_str}]"
+                f"[{timestamp:10.4f}] [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X} | L:0x{len(isotp_pkt.payload_bytes):04X}] [0x{parsed_info['service_hex']:02X} {parsed_info['service_name'][:35]:<35} | {params_str}]"
             )
         else:
             # Verbose multi-line output
@@ -366,13 +457,26 @@ class TraceAnalyzer:
             if "kwp" in self.print_layers:
                 if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
                     try:
-                        kwp_msg = KWP(payload_bytes)
-                        _ = getattr(kwp_msg, "service", None)
-
-                        if kwp_msg:
+                        parsed_info = None
+                        kwp_msg = None
+                        
+                        if self.custom_defs:
+                            parsed_info = self.parse_custom_payload(payload_bytes, isotp_pkt)
+                            
+                        if parsed_info:
+                            # Successfully bypassed scapy! We pass Raw wrapper to hook in case they want bytes
                             kwp_msg_count += 1
-                            parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
+                            kwp_msg = Raw(payload_bytes)
                             self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
+                        else:
+                            # Fallback to Scapy logic
+                            kwp_msg = KWP(payload_bytes)
+                            _ = getattr(kwp_msg, "service", None)
+
+                            if kwp_msg:
+                                kwp_msg_count += 1
+                                parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
+                                self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
                     except Exception as e:
                         pass
 
@@ -393,6 +497,7 @@ if __name__ == "__main__":
             verbose=args.verbose,
             comm_type=args.type,
             print_layers=getattr(args, "print"),
+            defs_file=args.defs,
         )
         analyzer.analyze()
     finally:
