@@ -216,26 +216,29 @@ class TraceAnalyzer:
             return None
             
         service_id = payload_bytes[0]
-        is_response = service_id >= 0x40
-        base_service_id = service_id - 0x40 if is_response else service_id
-        base_hex = f"0x{base_service_id:02X}"
+        hex_key = f"0x{service_id:02X}"
+        str_key = str(service_id)
         
-        # We look up by base service ID (e.g. "0x1A" maps both 0x1A and 0x5A)
-        services_dict = self.custom_defs.get("services", {})
+        services_dict = self.custom_defs.get("services", self.custom_defs)
         
-        # Try both the normalized hex string (0xXX) and integer mapping if they typed "26" 
-        service_def = services_dict.get(base_hex)
-        if not service_def:
-            service_def = services_dict.get(str(base_service_id))
+        service_def = services_dict.get(hex_key) or services_dict.get(str_key)
             
         if not service_def:
             return None
             
-        service_name = service_def.get("name", f"CustomService_{base_hex}")
-        if is_response:
-            service_name += "PositiveResponse"
-            
-        layout = service_def.get("response" if is_response else "request", [])
+        service_name = service_def.get("name", f"CustomService_{hex_key}")
+        
+        payload_len_str = str(len(payload_bytes))
+        
+        if "cases" in service_def:
+            if payload_len_str in service_def["cases"]:
+                layout = service_def["cases"][payload_len_str]
+            elif "default" in service_def["cases"]:
+                layout = service_def["cases"]["default"]
+            else:
+                layout = []
+        else:
+            layout = service_def.get("args", [])
         
         arb_id = getattr(isotp_pkt, "rx_id", 0)
         src = arb_id & 0xFF
@@ -261,12 +264,12 @@ class TraceAnalyzer:
             # If length is 1-8 bytes, parse as integer to allow enum lookup
             if 0 < p_len <= 8:
                 int_val = int.from_bytes(raw_val, byteorder='big')
-                hex_key = f"0x{int_val:02X}"
-                str_key = str(int_val)
+                hex_val_str = f"0x{int_val:02X}"
+                str_val_str = str(int_val)
                 
                 # Check enum map for string resolution
                 enum_map = param.get("enum", {})
-                named_val = enum_map.get(hex_key) or enum_map.get(str_key)
+                named_val = enum_map.get(hex_val_str) or enum_map.get(str_val_str)
                 
                 if named_val:
                     params_dict[p_name] = {"value": int_val, "name": named_val}
@@ -304,7 +307,7 @@ class TraceAnalyzer:
             for k, v in parsed_info["params"].items():
                 if isinstance(v, dict) and "name" in v and "value" in v:
                     formatted_params.append(f"{k}=0x{v['value']:02X} {v['name']}")
-                elif isinstance(v, bytes):
+                elif isinstance(v, (bytes, bytearray)):
                     formatted_params.append(
                         f"{k}=" + " ".join([f"0x{b:02X}" for b in v])
                     )
