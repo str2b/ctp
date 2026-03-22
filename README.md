@@ -25,8 +25,6 @@ python analyzer.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs
 - `-o`, `--output`: Optional file to redirect `stdout`.
 - `-v`, `--verbose`: Print Scapy output.
 
-*(Note: Additional arguments like `-p` are provided by the hook, not the core analyzer).*
-
 ---
 
 ## Custom Definitions (JSON)

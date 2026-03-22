@@ -40,6 +40,7 @@ def setup_parser():
     )
     return parser
 
+
 class TraceAnalyzer:
     def __init__(
         self,
@@ -68,7 +69,6 @@ class TraceAnalyzer:
                 print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
             except Exception as e:
                 print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
-
 
     def get_can_packets(self):
         """Reads ASC file using python-can and converts to Scapy CAN packets."""
@@ -120,7 +120,27 @@ class TraceAnalyzer:
 
         # Scapy returns the hex string if it cannot resolve the KWP service enum
         if service_name.startswith("0x") or service_name.isdigit():
-            service_name = "<Unknown_Service>"
+            req_name = None
+            # Guard: subtraction only makes sense if service_hex > 0x40
+            if isinstance(service_hex, int) and service_hex > 0x40:
+                req_id = service_hex - 0x40
+                # 1. Try custom_defs
+                if self.custom_defs:
+                    _, req_name = self._lookup_service_def(req_id)
+                # 2. Try Scapy if custom_defs had no match
+                if not req_name:
+                    try:
+                        req_scapy_name = KWP(bytes([req_id])).sprintf("%KWP.service%")
+                        if not (
+                            req_scapy_name.startswith("0x") or req_scapy_name.isdigit()
+                        ):
+                            req_name = req_scapy_name
+                    except Exception:
+                        pass
+            if req_name:
+                service_name = f"{req_name}PositiveResponse"
+            else:
+                service_name = "<Unknown_Service>"
 
         params_dict = {}
         if kwp_msg.payload:
@@ -162,6 +182,15 @@ class TraceAnalyzer:
             "params": params_dict,
         }
 
+    def _lookup_service_def(self, service_id):
+        """Lookup a single service ID in the custom defs. Returns (service_def, name) or (None, None)."""
+        services_dict = self.custom_defs.get("services", self.custom_defs)
+        hex_key = f"0x{service_id:02X}"
+        str_key = str(service_id)
+        service_def = services_dict.get(hex_key) or services_dict.get(str_key)
+        if service_def:
+            return service_def, service_def.get("name", f"CustomService_{hex_key}")
+        return None, None
 
     def parse_custom_payload(self, payload_bytes, basic_info):
         """Bypass Scapy and map payload exactly based on custom JSON definitions."""
@@ -169,17 +198,12 @@ class TraceAnalyzer:
             return None
 
         service_id = payload_bytes[0]
-        hex_key = f"0x{service_id:02X}"
-        str_key = str(service_id)
 
-        services_dict = self.custom_defs.get("services", self.custom_defs)
-
-        service_def = services_dict.get(hex_key) or services_dict.get(str_key)
+        service_def, service_name = self._lookup_service_def(service_id)
 
         if not service_def:
             return None
 
-        service_name = service_def.get("name", f"CustomService_{hex_key}")
         basic_info["service_name"] = service_name
 
         args_layout = service_def.get("args") or {}
@@ -326,14 +350,20 @@ class TraceAnalyzer:
             if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
                 try:
                     handled = False
-                    
+
                     if self.custom_defs:
                         arb_id = getattr(isotp_pkt, "rx_id", 0)
                         src = arb_id & 0xFF
                         tgt = self.id_to_target.get(arb_id, 0xFF)
                         service_id = payload_bytes[0]
-                        basic_info = {"src": src, "tgt": tgt, "service_hex": service_id, "service_name": "", "params": {}}
-                        
+                        basic_info = {
+                            "src": src,
+                            "tgt": tgt,
+                            "service_hex": service_id,
+                            "service_name": "",
+                            "params": {},
+                        }
+
                         fast_info = self.parse_custom_payload(payload_bytes, basic_info)
                         if fast_info:
                             kwp_msg_count += 1
@@ -380,16 +410,16 @@ if __name__ == "__main__":
             spec = importlib.util.spec_from_file_location("plugin_hook", hook_path)
             hook_mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(hook_mod)
-            
+
             # Allow plugin to register its own arguments
             if hasattr(hook_mod, "add_arguments"):
                 hook_mod.add_arguments(parser)
-                
+
             can_hook = getattr(hook_mod, "on_can_message", None)
             isotp_hook = getattr(hook_mod, "on_isotp_message", None)
             kwp_hook = getattr(hook_mod, "on_kwp_message", None)
             plugin_init = getattr(hook_mod, "init", None)
-            
+
             print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
         except Exception as e:
             print(f"Failed to load hook plugin {known_args.hook}: {e}", file=sys.stderr)
