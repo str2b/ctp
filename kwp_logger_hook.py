@@ -3,6 +3,7 @@ KWP2000 Logger Hook Plugin
 Implements specific enum resolution and pretty-printing logic for Generic traces.
 Now cleanly implements its own argument parsing and custom payload definitions!
 """
+
 import sys
 import json
 from scapy.all import Raw
@@ -21,6 +22,7 @@ id_to_dir = {}
 # Global configurations
 print_layers = ["kwp"]
 
+
 def add_arguments(parser):
     """Called by the core analyzer to let the plugin register its own arguments."""
     parser.add_argument(
@@ -32,22 +34,20 @@ def add_arguments(parser):
         help="[Plugin] Which layers to print output for (default: isotp)",
     )
 
+
 def init(args):
     """Called by the core analyzer after arguments are parsed."""
     global print_layers
-    
+
     if hasattr(args, "print") and args.print:
         print_layers = args.print
-
-
-
 
 
 def on_can_message(can_pkt):
     """Optional hook for raw CAN packets."""
     if "raw" not in print_layers:
         return
-        
+
     dir_flag = getattr(can_pkt, "direction", None)
     if dir_flag is None or dir_flag == "??":
         dir_flag = "??"
@@ -61,7 +61,7 @@ def on_isotp_message(isotp_pkt):
     """Optional hook for ISOTP payloads."""
     if "isotp" not in print_layers:
         return
-        
+
     dir_flag = getattr(isotp_pkt, "direction", None)
     if dir_flag is None or dir_flag == "??":
         dir_flag = "??"
@@ -84,9 +84,13 @@ def format_params(params_dict):
         ):
             formatted_params.append(f"{k}=0x{v:02X} ({Generic_specific_enum[v]})")
         elif (
-            k == "memoryType" and isinstance(v, int) and v in Generic_memoryTypeIdentifiers
+            k == "memoryType"
+            and isinstance(v, int)
+            and v in Generic_memoryTypeIdentifiers
         ):
-            formatted_params.append(f"{k}=0x{v:02X} ({Generic_memoryTypeIdentifiers[v]})")
+            formatted_params.append(
+                f"{k}=0x{v:02X} ({Generic_memoryTypeIdentifiers[v]})"
+            )
         elif isinstance(v, dict) and "name" in v and "value" in v:
             val = v["value"]
             formatted_params.append(
@@ -108,12 +112,12 @@ def on_kwp_message(kwp_msg, parsed_info, isotp_pkt):
     """Main trace logger hook."""
     if "kwp" not in print_layers:
         return
-        
+
     raw_payload = isotp_pkt.payload_bytes
     timestamp = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
 
     params_str = format_params(parsed_info["params"])
 
     print(
-        f"[{timestamp:15.6f}] [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X} | L:0x{len(raw_payload):04X}] [0x{parsed_info['service_hex']:02X} ({parsed_info['service_name'][:35]:<35}) | {params_str}]"
+        f"[{timestamp:15.6f}] [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X} | L:0x{len(raw_payload):04X}] [0x{parsed_info['service_hex']:02X} ({parsed_info['service_name'][:35]:<35}){' | ' + params_str if params_str else ''}]"
     )

@@ -40,13 +40,23 @@ If a payload matches a definition, the analyzer parses it natively into a dictio
       "name": "FictionalServiceKey",
       "args": {
         "default": [
-          {"name": "fictionalId", "length": 2},
-          {"name": "dataPayload", "length": 2}
-        ],
-        "5": [
-          {"name": "fictionalId", "length": 2},
-          {"name": "statusFlag", "length": 1, "enum": {"0x01": "active", "0x00": "inactive"}},
-          {"name": "dataPayload", "length": 2}
+          {
+            "name": "fictionalId", 
+            "length": 1,
+            "enum": {"0x0A": "getStatus", "0x0B": "getSecurity"}
+          },
+          {
+            "switch_on": "fictionalId",
+            "mux": {
+              "0x0A": [
+                {"name": "fictionalSubStatus", "length": 1, "enum": {"0x01": "active", "0x00": "inactive"}}
+              ],
+              "0x0B": [
+                {"name": "fictionalSecurity", "length": 4}
+              ]
+            }
+          },
+          {"name": "fictionalData", "length": -1}
         ]
       }
     }
@@ -55,8 +65,8 @@ If a payload matches a definition, the analyzer parses it natively into a dictio
 ```
 In this example:
 1. If the KWP service ID is `0x99`, the core identifies it as `FictionalServiceKey`.
-2. Based on payload length, the layout dictionary key is selected. If the payload is exactly `5` bytes, the parser unpacks a `statusFlag` using the enum map.
-3. If the payload length does not match `5` or any other specific key, the parser falls back to the `default` configuration string.
+2. Based on payload length, the layout dictionary key is selected (in this case, `default`).
+3. **Conditional Muxing:** After the parser evaluates `fictionalId`, the array pops a standalone router object (`mux`). To resolve its path, it queries the parser's memory using the `switch_on` parameter tag (`"fictionalId"`). If the memory state evaluates to `0x0A`, the `fictionalSubStatus` parameter is dynamically injected into the processing queue before reading `fictionalData`. If it evaluates to `0x0B`, `fictionalSecurity` is injected instead. This `mux` router naturally supports independent, cascading evaluations.
 
 ---
 

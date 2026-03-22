@@ -214,7 +214,40 @@ class TraceAnalyzer:
         params_dict = {}
         offset = 1
 
-        for param in layout:
+        layout_queue = list(layout)
+
+        while layout_queue:
+            param = layout_queue.pop(0)
+
+            # Standalone Mux Routing Object
+            if "mux" in param:
+                switch_on = param.get("switch_on")
+                if not switch_on:
+                    continue
+
+                prev_val = params_dict.get(switch_on)
+                if prev_val is None:
+                    continue
+
+                if isinstance(prev_val, dict):
+                    int_val = prev_val.get("value")
+                elif isinstance(prev_val, int):
+                    int_val = prev_val
+                elif isinstance(prev_val, (bytes, bytearray)):
+                    int_val = int.from_bytes(prev_val, byteorder="big")
+                else:
+                    continue
+
+                hex_val_str = f"0x{int_val:02X}"
+                str_val_str = str(int_val)
+
+                cases = param["mux"]
+                matched_mux = cases.get(hex_val_str) or cases.get(str_val_str) or cases.get("default")
+                if matched_mux and isinstance(matched_mux, list):
+                    layout_queue = matched_mux + layout_queue
+                
+                continue
+
             p_name = param.get("name", "unknown")
             p_len = param.get("length", 1)
 
@@ -245,6 +278,7 @@ class TraceAnalyzer:
                         params_dict[p_name] = int_val
                     else:
                         params_dict[p_name] = raw_val
+
             else:
                 params_dict[p_name] = raw_val
 
