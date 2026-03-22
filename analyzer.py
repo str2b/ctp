@@ -51,6 +51,7 @@ class TraceAnalyzer:
         self.can_hook = can_hook
         self.isotp_hook = isotp_hook
         self.kwp_hook = kwp_hook
+        self.kwp_fast_parse = None
         self.id_to_target = {}
         self.id_to_dir = {}
 
@@ -243,14 +244,31 @@ class TraceAnalyzer:
 
             if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
                 try:
-                    kwp_msg = KWP(payload_bytes)
-                    _ = getattr(kwp_msg, "service", None)
+                    handled = False
+                    
+                    if getattr(self, "kwp_fast_parse", None):
+                        arb_id = getattr(isotp_pkt, "rx_id", 0)
+                        src = arb_id & 0xFF
+                        tgt = self.id_to_target.get(arb_id, 0xFF)
+                        service_id = payload_bytes[0]
+                        basic_info = {"src": src, "tgt": tgt, "service_hex": service_id, "service_name": "", "params": {}}
+                        
+                        fast_info = self.kwp_fast_parse(payload_bytes, basic_info)
+                        if fast_info:
+                            kwp_msg_count += 1
+                            if self.kwp_hook:
+                                self.kwp_hook(Raw(payload_bytes), fast_info, isotp_pkt)
+                            handled = True
 
-                    if kwp_msg:
-                        kwp_msg_count += 1
-                        parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
-                        if self.kwp_hook:
-                            self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
+                    if not handled:
+                        kwp_msg = KWP(payload_bytes)
+                        _ = getattr(kwp_msg, "service", None)
+
+                        if kwp_msg:
+                            kwp_msg_count += 1
+                            parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
+                            if self.kwp_hook:
+                                self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
                 except Exception as e:
                     pass
 
@@ -269,6 +287,7 @@ if __name__ == "__main__":
     can_hook = None
     isotp_hook = None
     kwp_hook = None
+    kwp_fast_parse = None
     plugin_init = None
 
     if known_args.hook:
@@ -288,6 +307,7 @@ if __name__ == "__main__":
             can_hook = getattr(hook_mod, "on_can_message", None)
             isotp_hook = getattr(hook_mod, "on_isotp_message", None)
             kwp_hook = getattr(hook_mod, "on_kwp_message", None)
+            kwp_fast_parse = getattr(hook_mod, "kwp_fast_parse", None)
             plugin_init = getattr(hook_mod, "init", None)
             
             print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
@@ -310,6 +330,9 @@ if __name__ == "__main__":
             isotp_hook=isotp_hook,
             kwp_hook=kwp_hook,
         )
+        if kwp_fast_parse:
+            analyzer.kwp_fast_parse = kwp_fast_parse
+            
         analyzer.analyze()
     finally:
         if out_file:

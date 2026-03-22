@@ -54,10 +54,10 @@ def init(args):
             print(f"Failed to load defs file {args.defs}: {e}", file=sys.stderr)
 
 
-def apply_custom_definitions(parsed_info, payload_bytes):
-    """Enriches or overwrites parsed_info using custom definitions if they exist."""
+def kwp_fast_parse(payload_bytes, basic_info):
+    """Fast-path extractor to bypass Scapy if a custom definition exists."""
     if not custom_defs or len(payload_bytes) < 1:
-        return parsed_info
+        return None
 
     service_id = payload_bytes[0]
     hex_key = f"0x{service_id:02X}"
@@ -67,10 +67,10 @@ def apply_custom_definitions(parsed_info, payload_bytes):
     service_def = services_dict.get(hex_key) or services_dict.get(str_key)
 
     if not service_def:
-        return parsed_info  # No custom definition
+        return None  # No custom definition found, fallback to Scapy
 
     service_name = service_def.get("name", f"CustomService_{hex_key}")
-    parsed_info["service_name"] = service_name
+    basic_info["service_name"] = service_name
 
     args_layout = service_def.get("args") or {}
     payload_len_str = str(len(payload_bytes))
@@ -116,8 +116,8 @@ def apply_custom_definitions(parsed_info, payload_bytes):
     if offset < len(payload_bytes):
         params_dict["trailing_payload"] = payload_bytes[offset:]
 
-    parsed_info["params"] = params_dict
-    return parsed_info
+    basic_info["params"] = params_dict
+    return basic_info
 
 
 def on_can_message(can_pkt):
@@ -186,10 +186,7 @@ def on_kwp_message(kwp_msg, parsed_info, isotp_pkt):
     if "kwp" not in print_layers:
         return
         
-    # Apply custom definitions if available
     raw_payload = isotp_pkt.payload_bytes
-    parsed_info = apply_custom_definitions(parsed_info, raw_payload)
-
     timestamp = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
 
     params_str = format_params(parsed_info["params"])
