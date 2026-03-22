@@ -30,6 +30,11 @@ def setup_parser():
         "-o", "--output", help="Optional output file to save logs to natively"
     )
     parser.add_argument(
+        "-d",
+        "--defs",
+        help="Optional JSON file defining custom service layouts to override Scapy",
+    )
+    parser.add_argument(
         "--hook",
         help="Optional Python file defining protocol hooks (e.g. on_kwp_message)",
     )
@@ -41,6 +46,7 @@ class TraceAnalyzer:
         trace_file,
         verbose=False,
         addressing="standard",
+        defs_file=None,
         can_hook=None,
         isotp_hook=None,
         kwp_hook=None,
@@ -51,9 +57,17 @@ class TraceAnalyzer:
         self.can_hook = can_hook
         self.isotp_hook = isotp_hook
         self.kwp_hook = kwp_hook
-        self.kwp_fast_parse = None
         self.id_to_target = {}
         self.id_to_dir = {}
+
+        self.custom_defs = {}
+        if defs_file:
+            try:
+                with open(defs_file, "r") as f:
+                    self.custom_defs = json.load(f)
+                print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
+            except Exception as e:
+                print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
 
 
     def get_can_packets(self):
@@ -148,6 +162,73 @@ class TraceAnalyzer:
             "params": params_dict,
         }
 
+
+    def parse_custom_payload(self, payload_bytes, basic_info):
+        """Bypass Scapy and map payload exactly based on custom JSON definitions."""
+        if not self.custom_defs or len(payload_bytes) < 1:
+            return None
+
+        service_id = payload_bytes[0]
+        hex_key = f"0x{service_id:02X}"
+        str_key = str(service_id)
+
+        services_dict = self.custom_defs.get("services", self.custom_defs)
+
+        service_def = services_dict.get(hex_key) or services_dict.get(str_key)
+
+        if not service_def:
+            return None
+
+        service_name = service_def.get("name", f"CustomService_{hex_key}")
+        basic_info["service_name"] = service_name
+
+        args_layout = service_def.get("args") or {}
+
+        payload_len_str = str(len(payload_bytes))
+        layout = args_layout.get(payload_len_str, args_layout.get("default", []))
+
+        params_dict = {}
+        offset = 1
+
+        for param in layout:
+            p_name = param.get("name", "unknown")
+            p_len = param.get("length", 1)
+
+            if offset >= len(payload_bytes):
+                break
+
+            if p_len == -1:
+                raw_val = payload_bytes[offset:]
+                offset = len(payload_bytes)
+            else:
+                raw_val = payload_bytes[offset : offset + p_len]
+                offset += p_len
+
+            # If length is 1-8 bytes, parse as integer to allow enum lookup
+            if 0 < p_len <= 8:
+                int_val = int.from_bytes(raw_val, byteorder="big")
+                hex_val_str = f"0x{int_val:02X}"
+                str_val_str = str(int_val)
+
+                # Check enum map for string resolution
+                enum_map = param.get("enum", {})
+                named_val = enum_map.get(hex_val_str) or enum_map.get(str_val_str)
+
+                if named_val:
+                    params_dict[p_name] = {"value": int_val, "name": named_val}
+                else:
+                    if p_len == 1:
+                        params_dict[p_name] = int_val
+                    else:
+                        params_dict[p_name] = raw_val
+            else:
+                params_dict[p_name] = raw_val
+
+        if offset < len(payload_bytes):
+            params_dict["trailing_payload"] = payload_bytes[offset:]
+
+        basic_info["params"] = params_dict
+        return basic_info
 
     def analyze(self):
         # 1. Parse raw CAN messages
@@ -246,14 +327,14 @@ class TraceAnalyzer:
                 try:
                     handled = False
                     
-                    if getattr(self, "kwp_fast_parse", None):
+                    if self.custom_defs:
                         arb_id = getattr(isotp_pkt, "rx_id", 0)
                         src = arb_id & 0xFF
                         tgt = self.id_to_target.get(arb_id, 0xFF)
                         service_id = payload_bytes[0]
                         basic_info = {"src": src, "tgt": tgt, "service_hex": service_id, "service_name": "", "params": {}}
                         
-                        fast_info = self.kwp_fast_parse(payload_bytes, basic_info)
+                        fast_info = self.parse_custom_payload(payload_bytes, basic_info)
                         if fast_info:
                             kwp_msg_count += 1
                             if self.kwp_hook:
@@ -307,7 +388,6 @@ if __name__ == "__main__":
             can_hook = getattr(hook_mod, "on_can_message", None)
             isotp_hook = getattr(hook_mod, "on_isotp_message", None)
             kwp_hook = getattr(hook_mod, "on_kwp_message", None)
-            kwp_fast_parse = getattr(hook_mod, "kwp_fast_parse", None)
             plugin_init = getattr(hook_mod, "init", None)
             
             print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
@@ -326,13 +406,11 @@ if __name__ == "__main__":
             args.trace_file,
             verbose=args.verbose,
             addressing=args.addressing,
+            defs_file=args.defs,
             can_hook=can_hook,
             isotp_hook=isotp_hook,
             kwp_hook=kwp_hook,
         )
-        if kwp_fast_parse:
-            analyzer.kwp_fast_parse = kwp_fast_parse
-            
         analyzer.analyze()
     finally:
         if out_file:

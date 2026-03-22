@@ -20,7 +20,6 @@ id_to_dir = {}
 
 # Global configurations
 print_layers = ["kwp"]
-custom_defs = {}
 
 def add_arguments(parser):
     """Called by the core analyzer to let the plugin register its own arguments."""
@@ -32,92 +31,16 @@ def add_arguments(parser):
         default=["isotp"],
         help="[Plugin] Which layers to print output for (default: isotp)",
     )
-    parser.add_argument(
-        "-d",
-        "--defs",
-        help="[Plugin] Optional JSON file defining custom service layouts to override Scapy",
-    )
 
 def init(args):
     """Called by the core analyzer after arguments are parsed."""
-    global print_layers, custom_defs
+    global print_layers
     
-    if args.print:
+    if hasattr(args, "print") and args.print:
         print_layers = args.print
-        
-    if args.defs:
-        try:
-            with open(args.defs, "r") as f:
-                custom_defs = json.load(f)
-            print(f"Loaded custom definitions from {args.defs}", file=sys.stderr)
-        except Exception as e:
-            print(f"Failed to load defs file {args.defs}: {e}", file=sys.stderr)
 
 
-def kwp_fast_parse(payload_bytes, basic_info):
-    """Fast-path extractor to bypass Scapy if a custom definition exists."""
-    if not custom_defs or len(payload_bytes) < 1:
-        return None
 
-    service_id = payload_bytes[0]
-    hex_key = f"0x{service_id:02X}"
-    str_key = str(service_id)
-
-    services_dict = custom_defs.get("services", custom_defs)
-    service_def = services_dict.get(hex_key) or services_dict.get(str_key)
-
-    if not service_def:
-        return None  # No custom definition found, fallback to Scapy
-
-    service_name = service_def.get("name", f"CustomService_{hex_key}")
-    basic_info["service_name"] = service_name
-
-    args_layout = service_def.get("args") or {}
-    payload_len_str = str(len(payload_bytes))
-    layout = args_layout.get(payload_len_str, args_layout.get("default", []))
-
-    params_dict = {}
-    offset = 1
-
-    for param in layout:
-        p_name = param.get("name", "unknown")
-        p_len = param.get("length", 1)
-
-        if offset >= len(payload_bytes):
-            break
-
-        if p_len == -1:
-            raw_val = payload_bytes[offset:]
-            offset = len(payload_bytes)
-        else:
-            raw_val = payload_bytes[offset : offset + p_len]
-            offset += p_len
-
-        # If length is 1-8 bytes, parse as integer to allow enum lookup
-        if 0 < p_len <= 8:
-            int_val = int.from_bytes(raw_val, byteorder="big")
-            hex_val_str = f"0x{int_val:02X}"
-            str_val_str = str(int_val)
-
-            # Check enum map for string resolution
-            enum_map = param.get("enum", {})
-            named_val = enum_map.get(hex_val_str) or enum_map.get(str_val_str)
-
-            if named_val:
-                params_dict[p_name] = {"value": int_val, "name": named_val}
-            else:
-                if p_len == 1:
-                    params_dict[p_name] = int_val
-                else:
-                    params_dict[p_name] = raw_val
-        else:
-            params_dict[p_name] = raw_val
-
-    if offset < len(payload_bytes):
-        params_dict["trailing_payload"] = payload_bytes[offset:]
-
-    basic_info["params"] = params_dict
-    return basic_info
 
 
 def on_can_message(can_pkt):
