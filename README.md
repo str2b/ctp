@@ -89,3 +89,39 @@ A default reference plugin tailored for generic KWP traces. It handles enum reso
 
 ### Hook-specific Arguments
 - `-p`, `--print`: Specifies which layers to output to `stdout` (`raw`, `isotp`, `kwp`).
+- `--filter`: Path to a JSON filter definition file.
+
+### Hook Filtering Engine
+
+`kwp_logger_hook.py` dynamically embeds a powerful filter routing engine, invoked via `--filter`.
+
+Create a JSON file dictating rules, e.g. `filter.json`:
+```json
+{
+  "mode": "whitelist",
+  "rules": [
+    {
+      "layer": "can",
+      "id": "0x12F1",
+      "payload": "^0210.*"
+    },
+    {
+      "layer": "kwp",
+      "src": "0xF1",
+      "service": "0x31",
+      "payload": "^3101"
+    }
+  ]
+}
+```
+
+Run it via:
+```bash
+python analyzer.py trace.asc --filter filter.json
+```
+
+**Filter Rules**:
+- **Modes**: `whitelist` mode strictly filters out everything unless it matches at least one sub-rule. `blacklist` allows everything out unless it hits a sub-rule.
+- **Payload Regex**: The string evaluated under `"payload"` is compiled natively as Python Regex (`re.search(pattern, re.IGNORECASE)`), targeting the raw payload's standard hex string conversion representation (e.g. `1022AABB`). 
+  - Meaning `^...` strictly binds the prefix, and `.*` represents wildcard bytes.
+- **AND Constraints**: Inside a rule dictionary block, parameters are structurally AND'ed (e.g. `src == 0xF1 AND service == 0x31 AND payload matching regex`). If you need `OR` variants, simply append standalone `{}` target dictionaries to the `"rules"` array.
