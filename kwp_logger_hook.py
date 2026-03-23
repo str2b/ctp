@@ -21,6 +21,7 @@ id_to_dir = {}
 
 # Global configurations
 print_layers = ["kwp"]
+out_file = None
 
 
 def add_arguments(parser):
@@ -33,14 +34,29 @@ def add_arguments(parser):
         default=["isotp"],
         help="[Plugin] Which layers to print output for (default: isotp)",
     )
+    parser.add_argument(
+        "-o", "--output", help="[Plugin] Optional file to redirect stdout to natively."
+    )
 
 
 def init(args):
     """Called by the core analyzer after arguments are parsed."""
-    global print_layers
+    global print_layers, out_file
 
     if hasattr(args, "print") and args.print:
         print_layers = args.print
+        
+    if hasattr(args, "output") and args.output:
+        out_file = open(args.output, "w", encoding="utf-8")
+        sys.stdout = out_file
+
+
+def teardown():
+    """Called by the core analyzer upon completion."""
+    global out_file
+    if out_file:
+        sys.stdout = sys.__stdout__
+        out_file.close()
 
 
 def on_can_message(can_pkt):

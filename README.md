@@ -23,7 +23,6 @@ python analyzer.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs
 - `-d`, `--defs <file.json>`: Path to a JSON defs file extending KWP services.
 - `--filter <file.json>`: Path to a JSON filter definition file.
 - `--hook <file.py>`: Dynamically load a Python plugin hook script.
-- `-o`, `--output <file>`: Redirect `stdout` to a file.
 - `-v`, `--verbose`: Print Scapy output.
 
 ---
@@ -123,6 +122,7 @@ The core analyzer checks for the following optional functions in the plugin:
 - `on_can_message(can_pkt)`: Callback invoked for parsed CAN frames.
 - `on_isotp_message(isotp_pkt)`: Callback invoked for reassembled ISOTP payloads.
 - `on_kwp_message(kwp_msg, parsed_info, isotp_pkt)`: Callback invoked for KWP messages. `parsed_info` provides a dictionary containing generic fields (`src`, `tgt`, `service_hex`, `params`).
+- `teardown()`: Optional callback invoked locally right before the core engine gracefully terminates. Permits handling file teardown and internal clean up correctly.
 
 ---
 
@@ -131,3 +131,4 @@ A default reference plugin tailored for generic KWP traces. It handles enum reso
 
 ### Hook-specific Arguments
 - `-p`, `--print`: Specifies which layers to output to `stdout` (`raw`, `isotp`, `kwp`).
+- `-o`, `--output`: Redirect standard generic logger output strictly to a file.

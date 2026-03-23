@@ -27,9 +27,6 @@ def setup_parser():
         help="Type of ISOTP addressing layer (default: standard)",
     )
     parser.add_argument(
-        "-o", "--output", help="Optional output file to save logs to natively"
-    )
-    parser.add_argument(
         "-d",
         "--defs",
         help="Optional JSON file defining custom service layouts to override Scapy",
@@ -518,11 +515,6 @@ if __name__ == "__main__":
     parser = setup_parser()
     known_args, _ = parser.parse_known_args()
 
-    out_file = None
-    if known_args.output:
-        out_file = open(known_args.output, "w", encoding="utf-8")
-        sys.stdout = out_file
-
     can_hook = None
     isotp_hook = None
     kwp_hook = None
@@ -547,6 +539,7 @@ if __name__ == "__main__":
             isotp_hook = getattr(hook_mod, "on_isotp_message", None)
             kwp_hook = getattr(hook_mod, "on_kwp_message", None)
             plugin_init = getattr(hook_mod, "init", None)
+            plugin_teardown = getattr(hook_mod, "teardown", None)
 
             print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
         except Exception as e:
@@ -572,6 +565,5 @@ if __name__ == "__main__":
         )
         analyzer.analyze()
     finally:
-        if out_file:
-            sys.stdout = sys.__stdout__
-            out_file.close()
+        if plugin_teardown:
+            plugin_teardown()
