@@ -12,7 +12,25 @@ def setup_parser():
     parser = argparse.ArgumentParser(
         description="Python-based CAN Trace Analyzer using Scapy"
     )
-    parser.add_argument("trace_file", help="Path to the .asc trace file to analyze")
+    parser.add_argument(
+        "trace_file",
+        nargs="?",
+        help="Path to the .asc trace file to analyze (if not using live interface)."
+    )
+    parser.add_argument(
+        "-i", "--interface",
+        help="Live python-can interface (e.g., 'pcan', 'socketcan', 'vector').",
+    )
+    parser.add_argument(
+        "-c", "--channel",
+        help="Live python-can channel (e.g., 'vcan0', 'PCAN_USBBUS1'). Required if --interface is used.",
+    )
+    parser.add_argument(
+        "-b",
+        "--bitrate",
+        type=int,
+        help="Bitrate for live interfaces (e.g., 500000).",
+    )
     parser.add_argument(
         "-v",
         "--verbose",
@@ -45,7 +63,10 @@ def setup_parser():
 class TraceAnalyzer:
     def __init__(
         self,
-        trace_file,
+        trace_file=None,
+        interface=None,
+        channel=None,
+        bitrate=None,
         verbose=False,
         addressing="standard",
         defs_file=None,
@@ -55,6 +76,9 @@ class TraceAnalyzer:
         kwp_hook=None,
     ):
         self.trace_file = trace_file
+        self.interface = interface
+        self.channel = channel
+        self.bitrate = bitrate
         self.verbose = verbose
         self.addressing = addressing.lower()
         self.can_hook = can_hook
@@ -71,7 +95,7 @@ class TraceAnalyzer:
                 print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
             except Exception as e:
                 print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
-                
+
         self.filter_mode = "whitelist"
         self.filter_rules = []
         if filter_file:
@@ -80,7 +104,10 @@ class TraceAnalyzer:
                     filter_def = json.load(f)
                     self.filter_mode = filter_def.get("mode", "whitelist").lower()
                     self.filter_rules = filter_def.get("rules", [])
-                print(f"Loaded {len(self.filter_rules)} core filter rules in {self.filter_mode} mode.", file=sys.stderr)
+                print(
+                    f"Loaded {len(self.filter_rules)} core filter rules in {self.filter_mode} mode.",
+                    file=sys.stderr,
+                )
             except Exception as e:
                 print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -90,7 +117,9 @@ class TraceAnalyzer:
         if not self.filter_rules:
             return False
 
-        layer_rules = [r for r in self.filter_rules if r.get("layer", "").lower() == layer]
+        layer_rules = [
+            r for r in self.filter_rules if r.get("layer", "").lower() == layer
+        ]
         if not layer_rules:
             # Per-layer evaluation: if layer has no configuration, it is unrestrained
             # and relies entirely on other layer rules to police it.
@@ -98,6 +127,7 @@ class TraceAnalyzer:
 
         rule_matched = False
         import re
+
         for rule in layer_rules:
             rule_matches = True
             for key, expected_val in rule.items():
@@ -111,7 +141,9 @@ class TraceAnalyzer:
                     if not isinstance(val, (bytes, bytearray)):
                         rule_matches = False
                         break
-                    if not re.search(str(expected_val), val.hex().upper(), re.IGNORECASE):
+                    if not re.search(
+                        str(expected_val), val.hex().upper(), re.IGNORECASE
+                    ):
                         rule_matches = False
                         break
                 else:
@@ -146,8 +178,10 @@ class TraceAnalyzer:
             dl = payload[0] & 0x0F
             if 0 < dl <= len(payload) - 1:
                 isotp_payload = payload[1 : 1 + dl]
-                self.process_kwp(timestamp, direction, session_key, bytes(isotp_payload))
-                
+                self.process_kwp(
+                    timestamp, direction, session_key, bytes(isotp_payload)
+                )
+
         elif pci == 1:
             # First Frame
             if len(payload) >= 2:
@@ -156,16 +190,23 @@ class TraceAnalyzer:
                     "dl": dl,
                     "data": bytearray(payload[2:]),
                 }
-                
+
         elif pci == 2:
             # Consecutive Frame
             if session_key in self.isotp_sessions:
                 self.isotp_sessions[session_key]["data"].extend(payload[1:])
-                if len(self.isotp_sessions[session_key]["data"]) >= self.isotp_sessions[session_key]["dl"]:
-                    full_data = self.isotp_sessions[session_key]["data"][:self.isotp_sessions[session_key]["dl"]]
+                if (
+                    len(self.isotp_sessions[session_key]["data"])
+                    >= self.isotp_sessions[session_key]["dl"]
+                ):
+                    full_data = self.isotp_sessions[session_key]["data"][
+                        : self.isotp_sessions[session_key]["dl"]
+                    ]
                     del self.isotp_sessions[session_key]
-                    self.process_kwp(timestamp, direction, session_key, bytes(full_data))
-                    
+                    self.process_kwp(
+                        timestamp, direction, session_key, bytes(full_data)
+                    )
+
     def process_kwp(self, timestamp, direction, session_key, payload_bytes):
         class DummyISOTPPacket:
             def __init__(self):
@@ -199,10 +240,16 @@ class TraceAnalyzer:
                 if self.custom_defs:
                     src = isotp_pkt.rx_id & 0xFF
                     service_id = payload_bytes[0]
-                    
-                    if self.should_drop("kwp", src=src, tgt=tgt_addr, service=f"0x{service_id:0X}", payload=payload_bytes):
+
+                    if self.should_drop(
+                        "kwp",
+                        src=src,
+                        tgt=tgt_addr,
+                        service=f"0x{service_id:0X}",
+                        payload=payload_bytes,
+                    ):
                         return
-                        
+
                     basic_info = {
                         "src": src,
                         "tgt": tgt_addr,
@@ -220,7 +267,7 @@ class TraceAnalyzer:
 
                 if not handled:
                     kwp_msg = KWP(payload_bytes)
-                    
+
                     self.kwp_count += 1
                     parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
                     if self.kwp_hook:
@@ -429,12 +476,21 @@ class TraceAnalyzer:
 
     def analyze(self):
         try:
-            reader = can.ASCReader(self.trace_file)
+            if self.interface:
+                print(f"Opening LIVE interface '{self.interface}' on channel '{self.channel}'...", file=sys.stderr)
+                kwargs = {"interface": self.interface, "channel": self.channel}
+                if self.bitrate:
+                    kwargs["bitrate"] = self.bitrate
+                reader = can.Bus(**kwargs)
+            else:
+                if not self.trace_file:
+                    print("Error: You must specify either a trace_file or a live --interface (with --channel).", file=sys.stderr)
+                    sys.exit(1)
+                print(f"Reading {self.trace_file} in real-time streaming mode...", file=sys.stderr)
+                reader = can.ASCReader(self.trace_file)
         except Exception as e:
-            print(f"Error opening ASC file: {e}", file=sys.stderr)
+            print(f"Error opening data source: {e}", file=sys.stderr)
             sys.exit(1)
-
-        print(f"Reading {self.trace_file} in real-time streaming mode...", file=sys.stderr)
 
         self.isotp_sessions = {}
         self.can_count = 0
@@ -454,30 +510,41 @@ class TraceAnalyzer:
                 if len(msg.data) >= 2:
                     target_addr = msg.data[0]
                     self.id_to_target[arb_id] = target_addr
-                    
+
                     if self.should_drop("can", id=arb_id, payload=msg.data):
                         continue
-                        
+
                     if self.can_hook:
                         pkt = CAN(identifier=arb_id, data=msg.data[1:])
                         pkt.time = msg.timestamp
                         pkt.direction = direction
                         self.can_hook(pkt)
-                        
-                    self.process_isotp(msg.timestamp, direction, arb_id, target_addr, msg.data[1:])
+
+                    self.process_isotp(
+                        msg.timestamp, direction, arb_id, target_addr, msg.data[1:]
+                    )
             else:
                 if self.should_drop("can", id=arb_id, payload=msg.data):
                     continue
-                    
+
                 if self.can_hook:
                     pkt = CAN(identifier=arb_id, data=msg.data)
                     pkt.time = msg.timestamp
                     pkt.direction = direction
                     self.can_hook(pkt)
-                    
-                self.process_isotp(msg.timestamp, direction, arb_id, self.id_to_target.get(arb_id, 0xFF), msg.data)
 
-        print(f"Processed {self.can_count} CAN frames, yielding {self.isotp_count} ISOTPs and {self.kwp_count} KWPs.", file=sys.stderr)
+                self.process_isotp(
+                    msg.timestamp,
+                    direction,
+                    arb_id,
+                    self.id_to_target.get(arb_id, 0xFF),
+                    msg.data,
+                )
+
+        print(
+            f"Processed {self.can_count} CAN frames, yielding {self.isotp_count} ISOTPs and {self.kwp_count} KWPs.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
@@ -517,13 +584,21 @@ if __name__ == "__main__":
     # Second pass: fully parse all args including those added by plugin
     args = parser.parse_args()
 
+    if args.interface and not args.channel:
+        parser.error("--channel is required when --interface is specified.")
+    if not args.interface and not args.trace_file:
+        parser.error("You must specify either a trace_file or a live --interface (with --channel).")
+
     # Give the plugin a chance to read its args
     if plugin_init:
         plugin_init(args)
 
     try:
         analyzer = TraceAnalyzer(
-            args.trace_file,
+            trace_file=args.trace_file,
+            interface=args.interface,
+            channel=args.channel,
+            bitrate=args.bitrate,
             verbose=args.verbose,
             addressing=args.addressing,
             defs_file=args.defs,

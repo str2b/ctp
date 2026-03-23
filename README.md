@@ -18,7 +18,10 @@ python analyzer.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs
 ```
 
 ### Core Arguments
-- `trace_file`: Path to the `.asc` trace file.
+- `trace_file`: Path to the `.asc` trace file (optional if using live interface).
+- `-i`, `--interface`: Live python-can interface (e.g., `pcan`, `socketcan`, `vector`).
+- `-c`, `--channel`: Live python-can channel (e.g., `vcan0`, `PCAN_USBBUS1`). Required if `--interface` is used.
+- `-b`, `--bitrate`: Bitrate for live interfaces (e.g., `500000`).
 - `-A`, `--addressing`: Type of ISOTP addressing layer (default: `standard`, choices: `standard`, `extended`).
 - `-d`, `--defs <file.json>`: Path to a JSON defs file extending KWP services.
 - `--filter <file.json>`: Path to a JSON filter definition file.
