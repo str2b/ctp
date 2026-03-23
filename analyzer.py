@@ -7,6 +7,13 @@ from scapy.layers.can import CAN
 from scapy.contrib.automotive.kwp import KWP
 from scapy.contrib.isotp import ISOTP, ISOTPSession
 
+class ISOTPMessage:
+    def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes):
+        self.rx_id = rx_id
+        self.tgt_addr = tgt_addr
+        self.time = time
+        self.direction = direction
+        self.payload_bytes = payload_bytes
 
 def setup_parser():
     parser = argparse.ArgumentParser(
@@ -164,12 +171,14 @@ class TraceAnalyzer:
 
     def process_isotp(self, timestamp, direction, arb_id, target_addr, payload):
         if len(payload) == 0:
-            return
+            return None
 
         if self.addressing == "extended":
             session_key = (arb_id, target_addr)
+            rx_id = session_key[0]
         else:
             session_key = arb_id
+            rx_id = session_key
 
         pci = payload[0] >> 4
 
@@ -178,9 +187,7 @@ class TraceAnalyzer:
             dl = payload[0] & 0x0F
             if 0 < dl <= len(payload) - 1:
                 isotp_payload = payload[1 : 1 + dl]
-                self.process_kwp(
-                    timestamp, direction, session_key, bytes(isotp_payload)
-                )
+                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload))
 
         elif pci == 1:
             # First Frame
@@ -203,42 +210,19 @@ class TraceAnalyzer:
                         : self.isotp_sessions[session_key]["dl"]
                     ]
                     del self.isotp_sessions[session_key]
-                    self.process_kwp(
-                        timestamp, direction, session_key, bytes(full_data)
-                    )
+                    return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(full_data))
+                    
+        return None
 
-    def process_kwp(self, timestamp, direction, session_key, payload_bytes):
-        class DummyISOTPPacket:
-            def __init__(self):
-                self.rx_id = 0
-                self.time = 0.0
-                self.direction = "??"
-                self.payload_bytes = b""
-
-        isotp_pkt = DummyISOTPPacket()
-        if self.addressing == "extended":
-            isotp_pkt.rx_id = session_key[0]
-            tgt_addr = session_key[1]
-        else:
-            isotp_pkt.rx_id = session_key
-            tgt_addr = self.id_to_target.get(session_key, 0xFF)
-
-        isotp_pkt.time = timestamp
-        isotp_pkt.direction = direction
-        isotp_pkt.payload_bytes = payload_bytes
-
-        if self.should_drop("isotp", payload=payload_bytes):
-            return
-
-        self.isotp_count += 1
-        if self.isotp_hook:
-            self.isotp_hook(isotp_pkt)
+    def process_kwp(self, isotp_pkt):
+        payload_bytes = isotp_pkt.payload_bytes
 
         if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
             try:
                 handled = False
                 if self.custom_defs:
                     src = isotp_pkt.rx_id & 0xFF
+                    tgt_addr = isotp_pkt.tgt_addr
                     service_id = payload_bytes[0]
 
                     if self.should_drop(
@@ -506,6 +490,7 @@ class TraceAnalyzer:
             direction = "Rx" if msg.is_rx else "Tx"
             self.id_to_dir[arb_id] = direction
 
+            isotp_msg = None
             if self.addressing == "extended":
                 if len(msg.data) >= 2:
                     target_addr = msg.data[0]
@@ -520,7 +505,7 @@ class TraceAnalyzer:
                         pkt.direction = direction
                         self.can_hook(pkt)
 
-                    self.process_isotp(
+                    isotp_msg = self.process_isotp(
                         msg.timestamp, direction, arb_id, target_addr, msg.data[1:]
                     )
             else:
@@ -533,13 +518,23 @@ class TraceAnalyzer:
                     pkt.direction = direction
                     self.can_hook(pkt)
 
-                self.process_isotp(
+                target_addr = self.id_to_target.get(arb_id, 0xFF)
+                isotp_msg = self.process_isotp(
                     msg.timestamp,
                     direction,
                     arb_id,
-                    self.id_to_target.get(arb_id, 0xFF),
+                    target_addr,
                     msg.data,
                 )
+
+            if isotp_msg:
+                self.isotp_count += 1
+                if self.should_drop("isotp", payload=isotp_msg.payload_bytes):
+                    continue
+                if self.isotp_hook:
+                    self.isotp_hook(isotp_msg)
+                
+                self.process_kwp(isotp_msg)
 
         print(
             f"Processed {self.can_count} CAN frames, yielding {self.isotp_count} ISOTPs and {self.kwp_count} KWPs.",
