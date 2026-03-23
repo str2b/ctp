@@ -20,9 +20,10 @@ python analyzer.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs
 ### Core Arguments
 - `trace_file`: Path to the `.asc` trace file.
 - `-A`, `--addressing`: Type of ISOTP addressing layer (default: `standard`, choices: `standard`, `extended`).
-- `-d`, `--defs`: Optional JSON file defining custom payload schemas.
-- `--hook`: Path to a custom Python plugin script.
-- `-o`, `--output`: Optional file to redirect `stdout`.
+- `-d`, `--defs <file.json>`: Path to a JSON defs file extending KWP services.
+- `--filter <file.json>`: Path to a JSON filter definition file.
+- `--hook <file.py>`: Dynamically load a Python plugin hook script.
+- `-o`, `--output <file>`: Redirect `stdout` to a file.
 - `-v`, `--verbose`: Print Scapy output.
 
 ---
@@ -74,30 +75,9 @@ If an exact match is not found, the parser evaluates all hyphenated keys to see 
 
 ---
 
-## Hook Architecture
-Custom analyzer behavior is defined by passing a Python file to `--hook`. 
+## Core Filtering Engine
 
-### Hook API
-The core analyzer checks for the following optional functions in the plugin:
-
-- `add_arguments(parser)`: Register command-line arguments specific to the plugin.
-- `init(args)`: Called after arguments are parsed to initialize state.
-- `on_can_message(can_pkt)`: Callback invoked for parsed CAN frames.
-- `on_isotp_message(isotp_pkt)`: Callback invoked for reassembled ISOTP payloads.
-- `on_kwp_message(kwp_msg, parsed_info, isotp_pkt)`: Callback invoked for KWP messages. `parsed_info` provides a dictionary containing generic fields (`src`, `tgt`, `service_hex`, `params`).
-
----
-
-## Included Plugin: `kwp_logger_hook.py`
-A default reference plugin tailored for generic KWP traces. It handles enum resolution string formatting and prints the output.
-
-### Hook-specific Arguments
-- `-p`, `--print`: Specifies which layers to output to `stdout` (`raw`, `isotp`, `kwp`).
-- `--filter`: Path to a JSON filter definition file.
-
-### Hook Filtering Engine
-
-`kwp_logger_hook.py` dynamically embeds a powerful filter routing engine, invoked via `--filter`.
+`analyzer.py` natively bundles a powerful filter routing engine, invoked via `--filter`. It drops excluded ISOTP assemblies and KWP payloads deep inside the parser loop, significantly reducing overhead vs dropping in plugins.
 
 Create a JSON file dictating rules, e.g. `filter.json`:
 ```json
@@ -121,11 +101,33 @@ Create a JSON file dictating rules, e.g. `filter.json`:
 
 Run it via:
 ```bash
-python analyzer.py trace.asc --hook kwp_logger_hook.py --filter filter.json
+python analyzer.py trace.asc --filter filter.json
 ```
 
 **Filter Rules**:
-- **Modes**: `whitelist` mode strictly filters out everything unless it matches at least one sub-rule. `blacklist` allows everything out unless it hits a sub-rule.
-- **Payload Regex**: The string evaluated under `"payload"` is compiled natively as Python Regex (`re.search(pattern, re.IGNORECASE)`), targeting the raw payload's standard hex string conversion representation (e.g. `1022AABB`). 
+- **Modes**: `whitelist` mode drops payloads unless they explicitly match at least one rule for their layer. Layer rules are evaluated sequentially up the parsed stack (e.g. CAN drops cascade implicitly, preventing ISOTP extraction entirely). `blacklist` allows everything through unless it hits a matching rule targeting its precise layer.
+- **Payload Regex**: The string evaluated under `"payload"` is compiled natively as Python Regex (`re.search(pattern, re.IGNORECASE)`), targeting the raw payload's standard hex conversion string (e.g. `1022AABB`). 
   - Meaning `^...` strictly binds the prefix, and `.*` represents wildcard bytes.
 - **AND Constraints**: Inside a rule dictionary block, parameters are structurally AND'ed (e.g. `src == 0xF1 AND service == 0x31 AND payload matching regex`). If you need `OR` variants, simply append standalone `{}` target dictionaries to the `"rules"` array.
+
+---
+
+## Hook Architecture
+Custom analyzer behavior is defined by passing a Python file to `--hook`. 
+
+### Hook API
+The core analyzer checks for the following optional functions in the plugin:
+
+- `add_arguments(parser)`: Register command-line arguments specific to the plugin.
+- `init(args)`: Called after arguments are parsed to initialize state.
+- `on_can_message(can_pkt)`: Callback invoked for parsed CAN frames.
+- `on_isotp_message(isotp_pkt)`: Callback invoked for reassembled ISOTP payloads.
+- `on_kwp_message(kwp_msg, parsed_info, isotp_pkt)`: Callback invoked for KWP messages. `parsed_info` provides a dictionary containing generic fields (`src`, `tgt`, `service_hex`, `params`).
+
+---
+
+## Included Plugin: `kwp_logger_hook.py`
+A default reference plugin tailored for generic KWP traces. It handles enum resolution string formatting and prints the output.
+
+### Hook-specific Arguments
+- `-p`, `--print`: Specifies which layers to output to `stdout` (`raw`, `isotp`, `kwp`).

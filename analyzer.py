@@ -35,6 +35,10 @@ def setup_parser():
         help="Optional JSON file defining custom service layouts to override Scapy",
     )
     parser.add_argument(
+        "--filter",
+        help="Optional JSON filter engine configuration to dynamically route and drop payloads.",
+    )
+    parser.add_argument(
         "--hook",
         help="Optional Python file defining protocol hooks (e.g. on_kwp_message)",
     )
@@ -48,6 +52,7 @@ class TraceAnalyzer:
         verbose=False,
         addressing="standard",
         defs_file=None,
+        filter_file=None,
         can_hook=None,
         isotp_hook=None,
         kwp_hook=None,
@@ -69,6 +74,64 @@ class TraceAnalyzer:
                 print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
             except Exception as e:
                 print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
+                
+        self.filter_mode = "whitelist"
+        self.filter_rules = []
+        if filter_file:
+            try:
+                with open(filter_file, "r", encoding="utf-8") as f:
+                    filter_def = json.load(f)
+                    self.filter_mode = filter_def.get("mode", "whitelist").lower()
+                    self.filter_rules = filter_def.get("rules", [])
+                print(f"Loaded {len(self.filter_rules)} core filter rules in {self.filter_mode} mode.", file=sys.stderr)
+            except Exception as e:
+                print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
+                sys.exit(1)
+
+    def should_drop(self, layer, **kwargs):
+        """Evaluates attributes against JSON filter layer definitions. Returns True if frame should be discarded."""
+        if not self.filter_rules:
+            return False
+
+        layer_rules = [r for r in self.filter_rules if r.get("layer", "").lower() == layer]
+        if not layer_rules:
+            # Per-layer evaluation: if layer has no configuration, it is unrestrained
+            # and relies entirely on other layer rules to police it.
+            return False
+
+        rule_matched = False
+        import re
+        for rule in layer_rules:
+            rule_matches = True
+            for key, expected_val in rule.items():
+                if key == "layer":
+                    continue
+                val = kwargs.get(key)
+                if val is None:
+                    rule_matches = False
+                    break
+                if key == "payload":
+                    if not isinstance(val, (bytes, bytearray)):
+                        rule_matches = False
+                        break
+                    if not re.search(str(expected_val), val.hex().upper(), re.IGNORECASE):
+                        rule_matches = False
+                        break
+                else:
+                    str_val = str(val).upper()
+                    if isinstance(val, int):
+                        str_val = f"0x{val:0X}"
+                    exp_val_str = str(expected_val).upper()
+                    if str_val != exp_val_str and exp_val_str != str(val):
+                        rule_matches = False
+                        break
+            if rule_matches:
+                rule_matched = True
+                break
+
+        if self.filter_mode == "whitelist":
+            return not rule_matched
+        return rule_matched
 
     def get_can_packets(self):
         """Reads ASC file using python-can and converts to Scapy CAN packets."""
@@ -87,6 +150,8 @@ class TraceAnalyzer:
                     if len(msg.data) >= 2:  # Must have at least Target + PCI
                         target_addr = msg.data[0]
                         source_addr = msg.arbitration_id & 0xFF
+                        if self.should_drop("can", id=msg.arbitration_id, payload=msg.data):
+                            continue
                         self.id_to_target[msg.arbitration_id] = target_addr
                         self.id_to_dir[msg.arbitration_id] = "Rx" if msg.is_rx else "Tx"
                         # Strip extended address to construct standard CAN frame
@@ -98,6 +163,8 @@ class TraceAnalyzer:
                             self.can_hook(pkt)
                 else:
                     # Generic standard CAN frame
+                    if self.should_drop("can", id=msg.arbitration_id, payload=msg.data):
+                        continue
                     self.id_to_dir[msg.arbitration_id] = "Rx" if msg.is_rx else "Tx"
                     pkt = CAN(identifier=msg.arbitration_id, data=msg.data)
                     pkt.time = msg.timestamp
@@ -398,6 +465,9 @@ class TraceAnalyzer:
             isotp_pkt.direction = getattr(final_cf_pkt, "direction", "??")
             isotp_pkt.payload_bytes = payload_bytes
 
+            if self.should_drop("isotp", payload=payload_bytes):
+                continue
+
             if self.isotp_hook:
                 self.isotp_hook(isotp_pkt)
 
@@ -410,6 +480,10 @@ class TraceAnalyzer:
                         src = arb_id & 0xFF
                         tgt = self.id_to_target.get(arb_id, 0xFF)
                         service_id = payload_bytes[0]
+                        
+                        if self.should_drop("kwp", src=src, tgt=tgt, service=f"0x{service_id:0X}", payload=payload_bytes):
+                            continue
+                            
                         basic_info = {
                             "src": src,
                             "tgt": tgt,
@@ -491,6 +565,7 @@ if __name__ == "__main__":
             verbose=args.verbose,
             addressing=args.addressing,
             defs_file=args.defs,
+            filter_file=args.filter,
             can_hook=can_hook,
             isotp_hook=isotp_hook,
             kwp_hook=kwp_hook,
