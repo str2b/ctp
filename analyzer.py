@@ -130,48 +130,103 @@ class TraceAnalyzer:
             return not rule_matched
         return rule_matched
 
-    def get_can_packets(self):
-        """Reads ASC file using python-can and converts to Scapy CAN packets."""
-        print(f"Reading {self.trace_file}...", file=sys.stderr)
+    def process_isotp(self, timestamp, direction, arb_id, target_addr, payload):
+        if len(payload) == 0:
+            return
 
-        try:
-            reader = can.ASCReader(self.trace_file)
-        except Exception as e:
-            print(f"Error opening ASC file: {e}", file=sys.stderr)
-            sys.exit(1)
+        if self.addressing == "extended":
+            session_key = (arb_id, target_addr)
+        else:
+            session_key = arb_id
 
-        can_packets = []
-        for msg in reader:
-            if not msg.is_error_frame and not msg.is_remote_frame:
-                if self.addressing == "extended":
-                    if len(msg.data) >= 2:  # Must have at least Target + PCI
-                        target_addr = msg.data[0]
-                        source_addr = msg.arbitration_id & 0xFF
-                        if self.should_drop("can", id=msg.arbitration_id, payload=msg.data):
-                            continue
-                        self.id_to_target[msg.arbitration_id] = target_addr
-                        self.id_to_dir[msg.arbitration_id] = "Rx" if msg.is_rx else "Tx"
-                        # Strip extended address to construct standard CAN frame
-                        pkt = CAN(identifier=msg.arbitration_id, data=msg.data[1:])
-                        pkt.time = msg.timestamp
-                        pkt.direction = "Rx" if msg.is_rx else "Tx"
-                        can_packets.append(pkt)
-                        if self.can_hook:
-                            self.can_hook(pkt)
-                else:
-                    # Generic standard CAN frame
-                    if self.should_drop("can", id=msg.arbitration_id, payload=msg.data):
-                        continue
-                    self.id_to_dir[msg.arbitration_id] = "Rx" if msg.is_rx else "Tx"
-                    pkt = CAN(identifier=msg.arbitration_id, data=msg.data)
-                    pkt.time = msg.timestamp
-                    pkt.direction = "Rx" if msg.is_rx else "Tx"
-                    can_packets.append(pkt)
-                    if self.can_hook:
-                        self.can_hook(pkt)
+        pci = payload[0] >> 4
 
-        print(f"Loaded {len(can_packets)} standard CAN frames.", file=sys.stderr)
-        return can_packets
+        if pci == 0:
+            # Single Frame
+            dl = payload[0] & 0x0F
+            if 0 < dl <= len(payload) - 1:
+                isotp_payload = payload[1 : 1 + dl]
+                self.process_kwp(timestamp, direction, session_key, bytes(isotp_payload))
+                
+        elif pci == 1:
+            # First Frame
+            if len(payload) >= 2:
+                dl = ((payload[0] & 0x0F) << 8) | payload[1]
+                self.isotp_sessions[session_key] = {
+                    "dl": dl,
+                    "data": bytearray(payload[2:]),
+                }
+                
+        elif pci == 2:
+            # Consecutive Frame
+            if session_key in self.isotp_sessions:
+                self.isotp_sessions[session_key]["data"].extend(payload[1:])
+                if len(self.isotp_sessions[session_key]["data"]) >= self.isotp_sessions[session_key]["dl"]:
+                    full_data = self.isotp_sessions[session_key]["data"][:self.isotp_sessions[session_key]["dl"]]
+                    del self.isotp_sessions[session_key]
+                    self.process_kwp(timestamp, direction, session_key, bytes(full_data))
+                    
+    def process_kwp(self, timestamp, direction, session_key, payload_bytes):
+        class DummyISOTPPacket:
+            def __init__(self):
+                self.rx_id = 0
+                self.time = 0.0
+                self.direction = "??"
+                self.payload_bytes = b""
+
+        isotp_pkt = DummyISOTPPacket()
+        if self.addressing == "extended":
+            isotp_pkt.rx_id = session_key[0]
+            tgt_addr = session_key[1]
+        else:
+            isotp_pkt.rx_id = session_key
+            tgt_addr = self.id_to_target.get(session_key, 0xFF)
+
+        isotp_pkt.time = timestamp
+        isotp_pkt.direction = direction
+        isotp_pkt.payload_bytes = payload_bytes
+
+        if self.should_drop("isotp", payload=payload_bytes):
+            return
+
+        self.isotp_count += 1
+        if self.isotp_hook:
+            self.isotp_hook(isotp_pkt)
+
+        if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
+            try:
+                handled = False
+                if self.custom_defs:
+                    src = isotp_pkt.rx_id & 0xFF
+                    service_id = payload_bytes[0]
+                    
+                    if self.should_drop("kwp", src=src, tgt=tgt_addr, service=f"0x{service_id:0X}", payload=payload_bytes):
+                        return
+                        
+                    basic_info = {
+                        "src": src,
+                        "tgt": tgt_addr,
+                        "service_hex": service_id,
+                        "service_name": "",
+                        "params": {},
+                    }
+
+                    fast_info = self.parse_custom_payload(payload_bytes, basic_info)
+                    if fast_info:
+                        self.kwp_count += 1
+                        if self.kwp_hook:
+                            self.kwp_hook(Raw(payload_bytes), fast_info, isotp_pkt)
+                        handled = True
+
+                if not handled:
+                    kwp_msg = KWP(payload_bytes)
+                    
+                    self.kwp_count += 1
+                    parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
+                    if self.kwp_hook:
+                        self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
+            except Exception as e:
+                print(f"Error parsing KWP packet at {timestamp}: {e}", file=sys.stderr)
 
     def parse_kwp_message(self, kwp_msg, isotp_pkt):
         """Extracts and formats KWP attributes into a dictionary for hooks to easily consume."""
@@ -373,142 +428,56 @@ class TraceAnalyzer:
         return basic_info
 
     def analyze(self):
-        # 1. Parse raw CAN messages
-        self.loaded_cans = self.get_can_packets()
-
         try:
-            from scapy.contrib.automotive.kwp import KWP
-        except ImportError:
-            print(
-                "ERROR: Could not import scapy automotive kwp modules.", file=sys.stderr
-            )
+            reader = can.ASCReader(self.trace_file)
+        except Exception as e:
+            print(f"Error opening ASC file: {e}", file=sys.stderr)
             sys.exit(1)
 
-        print("Reassembling ISOTP internally...", file=sys.stderr)
+        print(f"Reading {self.trace_file} in real-time streaming mode...", file=sys.stderr)
 
-        isotp_sessions = {}
-        isotp_results = []
+        self.isotp_sessions = {}
+        self.can_count = 0
+        self.isotp_count = 0
+        self.kwp_count = 0
 
-        for p in self.loaded_cans:
-            if len(p.data) < 1:
+        for msg in reader:
+            if msg.is_error_frame or msg.is_remote_frame:
                 continue
 
-            arb_id = p.identifier
-            # In get_can_packets, the target address was already stripped from p.data!
-            # So p.data is now a standard ISOTP CAN payload (first byte is PCI).
-            # But we can recover the target address from self.id_to_target.
-            tgt = self.id_to_target.get(arb_id, 0xFF)
+            self.can_count += 1
+            arb_id = msg.arbitration_id
+            direction = "Rx" if msg.is_rx else "Tx"
+            self.id_to_dir[arb_id] = direction
 
             if self.addressing == "extended":
-                session_key = (arb_id, tgt)
-            else:
-                session_key = arb_id
-
-            payload = p.data[:]
-
-            if len(payload) == 0:
-                continue
-
-            pci = payload[0] >> 4
-
-            if pci == 0:
-                # Single Frame
-                dl = payload[0] & 0x0F
-                if dl > 0 and dl <= len(payload) - 1:
-                    isotp_payload = payload[1 : 1 + dl]
-                    isotp_results.append((p, isotp_payload, session_key))
-            elif pci == 1:
-                # First Frame
-                if len(payload) >= 2:
-                    dl = ((payload[0] & 0x0F) << 8) | payload[1]
-                    isotp_sessions[session_key] = {
-                        "dl": dl,
-                        "data": bytearray(payload[2:]),
-                    }
-            elif pci == 2:
-                # Consecutive Frame
-                if session_key in isotp_sessions:
-                    isotp_sessions[session_key]["data"].extend(payload[1:])
-                    if (
-                        len(isotp_sessions[session_key]["data"])
-                        >= isotp_sessions[session_key]["dl"]
-                    ):
-                        # Finished reassembly
-                        full_data = isotp_sessions[session_key]["data"][
-                            : isotp_sessions[session_key]["dl"]
-                        ]
-                        isotp_results.append((p, bytes(full_data), session_key))
-                        del isotp_sessions[session_key]
-
-        print(f"Extracted {len(isotp_results)} ISOTP payloads.", file=sys.stderr)
-
-        kwp_msg_count = 0
-        for final_cf_pkt, payload_bytes, session_key in isotp_results:
-
-            class DummyISOTPPacket:
-                def __init__(self):
-                    self.rx_id = 0
-                    self.time = 0.0
-                    self.direction = "??"
-                    self.payload_bytes = b""
-
-            isotp_pkt = DummyISOTPPacket()
-            if self.addressing == "extended":
-                isotp_pkt.rx_id = session_key[0]
-            else:
-                isotp_pkt.rx_id = session_key
-
-            isotp_pkt.time = final_cf_pkt.time if hasattr(final_cf_pkt, "time") else 0.0
-            isotp_pkt.direction = getattr(final_cf_pkt, "direction", "??")
-            isotp_pkt.payload_bytes = payload_bytes
-
-            if self.should_drop("isotp", payload=payload_bytes):
-                continue
-
-            if self.isotp_hook:
-                self.isotp_hook(isotp_pkt)
-
-            if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
-                try:
-                    handled = False
-
-                    if self.custom_defs:
-                        arb_id = getattr(isotp_pkt, "rx_id", 0)
-                        src = arb_id & 0xFF
-                        tgt = self.id_to_target.get(arb_id, 0xFF)
-                        service_id = payload_bytes[0]
+                if len(msg.data) >= 2:
+                    target_addr = msg.data[0]
+                    self.id_to_target[arb_id] = target_addr
+                    
+                    if self.should_drop("can", id=arb_id, payload=msg.data):
+                        continue
                         
-                        if self.should_drop("kwp", src=src, tgt=tgt, service=f"0x{service_id:0X}", payload=payload_bytes):
-                            continue
-                            
-                        basic_info = {
-                            "src": src,
-                            "tgt": tgt,
-                            "service_hex": service_id,
-                            "service_name": "",
-                            "params": {},
-                        }
+                    if self.can_hook:
+                        pkt = CAN(identifier=arb_id, data=msg.data[1:])
+                        pkt.time = msg.timestamp
+                        pkt.direction = direction
+                        self.can_hook(pkt)
+                        
+                    self.process_isotp(msg.timestamp, direction, arb_id, target_addr, msg.data[1:])
+            else:
+                if self.should_drop("can", id=arb_id, payload=msg.data):
+                    continue
+                    
+                if self.can_hook:
+                    pkt = CAN(identifier=arb_id, data=msg.data)
+                    pkt.time = msg.timestamp
+                    pkt.direction = direction
+                    self.can_hook(pkt)
+                    
+                self.process_isotp(msg.timestamp, direction, arb_id, self.id_to_target.get(arb_id, 0xFF), msg.data)
 
-                        fast_info = self.parse_custom_payload(payload_bytes, basic_info)
-                        if fast_info:
-                            kwp_msg_count += 1
-                            if self.kwp_hook:
-                                self.kwp_hook(Raw(payload_bytes), fast_info, isotp_pkt)
-                            handled = True
-
-                    if not handled:
-                        kwp_msg = KWP(payload_bytes)
-                        _ = getattr(kwp_msg, "service", None)
-
-                        if kwp_msg:
-                            kwp_msg_count += 1
-                            parsed_info = self.parse_kwp_message(kwp_msg, isotp_pkt)
-                            if self.kwp_hook:
-                                self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
-                except Exception as e:
-                    pass
-
-        print(f"Found {kwp_msg_count} KWP2000 messages.", file=sys.stderr)
+        print(f"Processed {self.can_count} CAN frames, yielding {self.isotp_count} ISOTPs and {self.kwp_count} KWPs.", file=sys.stderr)
 
 
 if __name__ == "__main__":
