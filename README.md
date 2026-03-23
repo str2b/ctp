@@ -68,6 +68,10 @@ In this example:
 2. Based on payload length, the layout dictionary key is selected (in this case, `default`).
 3. **Conditional Muxing:** After the parser evaluates `fictionalId`, the array pops a standalone router object (`mux`). To resolve its path, it queries the parser's memory using the `switch_on` parameter tag (`"fictionalId"`). If the memory state evaluates to `0x0A`, the `fictionalSubStatus` parameter is dynamically injected into the processing queue before reading `fictionalData`. If it evaluates to `0x0B`, `fictionalSecurity` is injected instead. This `mux` router naturally supports independent, cascading evaluations.
 
+### Enum Range Parsing
+The `enum` mapping dictionary supports exact integer matches (`"0x0A": "foo"`) as well as string-defined numerical ranges for grouping sets of values (`"0x1F0A-0x1F0F": "supplierSpecific"`). 
+If an exact match is not found, the parser evaluates all hyphenated keys to see if the value falls inclusively within bounds.
+
 ---
 
 ## Hook Architecture
@@ -117,7 +121,7 @@ Create a JSON file dictating rules, e.g. `filter.json`:
 
 Run it via:
 ```bash
-python analyzer.py trace.asc --filter filter.json
+python analyzer.py trace.asc --hook kwp_logger_hook.py --filter filter.json
 ```
 
 **Filter Rules**:

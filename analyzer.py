@@ -242,10 +242,14 @@ class TraceAnalyzer:
                 str_val_str = str(int_val)
 
                 cases = param["mux"]
-                matched_mux = cases.get(hex_val_str) or cases.get(str_val_str) or cases.get("default")
+                matched_mux = (
+                    cases.get(hex_val_str)
+                    or cases.get(str_val_str)
+                    or cases.get("default")
+                )
                 if matched_mux and isinstance(matched_mux, list):
                     layout_queue = matched_mux + layout_queue
-                
+
                 continue
 
             p_name = param.get("name", "unknown")
@@ -270,6 +274,22 @@ class TraceAnalyzer:
                 # Check enum map for string resolution
                 enum_map = param.get("enum", {})
                 named_val = enum_map.get(hex_val_str) or enum_map.get(str_val_str)
+
+                # Fallback to range resolution
+                if not named_val:
+                    for k, v in enum_map.items():
+                        if isinstance(k, str) and "-" in k:
+                            try:
+                                low_str, high_str = k.split("-", 1)
+                                if (
+                                    int(low_str.strip(), 0)
+                                    <= int_val
+                                    <= int(high_str.strip(), 0)
+                                ):
+                                    named_val = v
+                                    break
+                            except Exception:
+                                pass
 
                 if named_val:
                     params_dict[p_name] = {"value": int_val, "name": named_val}
