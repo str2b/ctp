@@ -1,0 +1,60 @@
+{
+  "services": {
+    "0x10": {
+      "name": "DiagnosticSessionControl",
+      "args": {
+        "2": [
+          {
+            "name": "sessionType",
+            "length": 1,
+            "enum": {
+              "0x01": "defaultSession",
+              "0x02": "programmingSession",
+              "0x03": "extendedDiagnosticSession",
+              "0x04": "safetySystemDiagnosticSession",
+              "0x40-0x7F": "vehicleManufacturerSpecific"
+            }
+          }
+        ]
+      }
+    },
+    "0x22": {
+      "name": "ReadDataByIdentifier",
+      "args": {
+        "default": [
+          {
+            "name": "dataIdentifier",
+            "length": 2,
+            "enum": {
+              "0xF190": "VinNumber",
+              "0xF18C": "EcuSerialNumber"
+            }
+          },
+          {
+            "switch_on": "dataIdentifier",
+            "mux": {
+              "0xF190": [
+                { "name": "vin", "length": 17 }
+              ],
+              "0xF18C": [
+                { "name": "serial", "length": -1 }
+              ],
+              "default": [
+                { "name": "rawData", "length": -1 }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "153": {
+      "name": "CustomDecimalService_0x99",
+      "args": {
+        "default": [
+          { "name": "header", "length": 1 },
+          { "name": "payload", "length": -1 }
+        ]
+      }
+    }
+  }
+}

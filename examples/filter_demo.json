@@ -1,0 +1,35 @@
+{
+  "mode": "whitelist",
+  "rules": [
+    {
+      "layer": "can",
+      "id": "0x123",
+      "payload": "^02.*"
+    },
+    {
+      "layer": "can",
+      "id": "0x291"
+    },
+    {
+      "layer": "can",
+      "id": "0x6AA"
+    },
+    {
+      "layer": "can",
+      "id": "0x6BB"
+    },
+    {
+      "layer": "isotp",
+      "payload": "^10.*|^22.*"
+    },
+    {
+      "layer": "kwp",
+      "service": "0x10",
+      "payload": "1001"
+    },
+    {
+      "layer": "kwp",
+      "service": "0x22"
+    }
+  ]
+}

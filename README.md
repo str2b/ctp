@@ -4,6 +4,8 @@ A Python tool for parsing CAN trace files (`.asc`), ISOTP payloads and KWP2000 m
 
 The analyzer extracts protocols and delegates logic to plugins via a hook architecture.
 
+Disclaimer: This started as a vibe-coding piece of script for some hobby analysis project, so don't expect production-ready code.
+
 ## Features
 - **CAN Parsing:** Reads `.asc` trace files using `python-can`.
 - **ISOTP Reassembly:** Assembles ISOTP streams (supports standard and extended addressing).
@@ -15,6 +17,36 @@ The analyzer extracts protocols and delegates logic to plugins via a hook archit
 Example execution:
 ```bash
 python analyzer.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs custom_defs.json
+```
+
+See [examples/](examples/) for configuration templates and a test trace.
+
+---
+
+## Examples
+
+The `examples/` directory contains templates for the filtering engine and custom KWP service definitions. 
+
+### 1. Filter Engine (`filter_demo.json`)
+Demonstrates supported logic for the `--filter` argument:
+- **Layer Targeting**: Rules for `can`, `isotp`, and `kwp` layers.
+- **Whitelist/Blacklist Modes**: Controlling the default drop behavior.
+- **Complex Constraints**: AND'ing multiple fields (e.g., `src` + `service` + `payload`).
+- **Regex Logic**: Pattern matching for hex payloads (e.g., `^10.*` for Diagnostic Session).
+
+### 2. Custom KWP Definitions (`kwp_defs_demo.json`)
+Demonstrates core semantics for the `--defs` argument:
+- **Static arg layouts**: Fixed-length parameters.
+- **Trailing payloads**: Using `length: -1` to capture remaining bytes.
+- **Enum Mapping**: Exact hex, integer, and range matches (`0x10-0x1F`).
+- **Conditional Layouts (`mux`)**: Dynamic branching based on a previous parameter's value (`switch_on`).
+
+### 3. Verification Trace (`smoke_test.asc`)
+A synthetic CAN trace file used to verify the analyzer logic. It contains no real vehicle data.
+
+Run the verification:
+```bash
+python analyzer.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook kwp_logger_hook.py -p isotp -p kwp
 ```
 
 ### Arguments

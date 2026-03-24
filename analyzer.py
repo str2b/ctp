@@ -134,7 +134,9 @@ class FilterEngine:
                         rule_matches = False
                         break
                 else:
-                    str_val = f"0x{val:0X}" if isinstance(val, int) else str(val).upper()
+                    str_val = (
+                        f"0X{val:0X}" if isinstance(val, int) else str(val).upper()
+                    )
                     exp_val_str = str(expected_val).upper()
                     if str_val != exp_val_str and exp_val_str != str(val):
                         rule_matches = False
