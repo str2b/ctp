@@ -8,12 +8,13 @@ from scapy.contrib.automotive.kwp import KWP
 from scapy.contrib.isotp import ISOTP, ISOTPSession
 
 class ISOTPMessage:
-    def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes):
+    def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes, can_frames=None):
         self.rx_id = rx_id
         self.tgt_addr = tgt_addr
         self.time = time
         self.direction = direction
         self.payload_bytes = payload_bytes
+        self.can_frames = can_frames or []
 
 def setup_parser():
     parser = argparse.ArgumentParser(
@@ -61,6 +62,16 @@ def setup_parser():
         help="Optional JSON filter engine configuration to dynamically route and drop payloads.",
     )
     parser.add_argument(
+        "--physical-ids",
+        nargs="+",
+        help="Optional list of physical CAN Arbitration IDs (hex or decimal) to natively parse as ISO-TP.",
+    )
+    parser.add_argument(
+        "--functional-ids",
+        nargs="+",
+        help="Optional list of functional CAN Arbitration IDs (hex or decimal) to natively parse as ISO-TP.",
+    )
+    parser.add_argument(
         "--hook",
         help="Optional Python file defining protocol hooks (e.g. on_kwp_message)",
     )
@@ -78,6 +89,8 @@ class TraceAnalyzer:
         addressing="standard",
         defs_file=None,
         filter_file=None,
+        physical_ids=None,
+        functional_ids=None,
         can_hook=None,
         isotp_hook=None,
         kwp_hook=None,
@@ -88,6 +101,17 @@ class TraceAnalyzer:
         self.bitrate = bitrate
         self.verbose = verbose
         self.addressing = addressing.lower()
+        
+        self.use_custom_ids = physical_ids is not None or functional_ids is not None
+        self.diagnostic_ids = set()
+        for ids_list in (physical_ids, functional_ids):
+            if ids_list:
+                for rxid in ids_list:
+                    try:
+                        self.diagnostic_ids.add(int(rxid, 16) if rxid.lower().startswith('0x') else int(rxid))
+                    except Exception:
+                        pass
+                        
         self.can_hook = can_hook
         self.isotp_hook = isotp_hook
         self.kwp_hook = kwp_hook
@@ -169,6 +193,19 @@ class TraceAnalyzer:
             return not rule_matched
         return rule_matched
 
+    def is_isotp_id(self, arb_id):
+        if self.use_custom_ids:
+            return arb_id in self.diagnostic_ids
+            
+        if 0x600 <= arb_id <= 0x6FF:
+            return True
+        if 0x7DF <= arb_id <= 0x7EF:
+            return True
+        if (arb_id & 0x00FFFF00) in (0x00DA0000, 0x00DB0000):
+            return True
+            
+        return False
+
     def process_isotp(self, timestamp, direction, arb_id, payload):
         if len(payload) == 0:
             return None
@@ -191,36 +228,66 @@ class TraceAnalyzer:
             return None
 
         pci = isotp_payload[0] >> 4
+        can_frame_entry = (timestamp, direction, arb_id, payload)
 
         if pci == 0:
             # Single Frame
             dl = isotp_payload[0] & 0x0F
             if 0 < dl <= len(isotp_payload) - 1:
+                if dl > (7 if self.addressing == "standard" else 6):
+                    return None
+                    
                 isotp_payload_extracted = isotp_payload[1 : 1 + dl]
-                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload_extracted))
+                
+                # Validation for padding bytes.
+                padding_bytes = isotp_payload[1 + dl :]
+                if len(padding_bytes) > 0:
+                    if len(set(padding_bytes)) > 1:
+                        return None
+                    if padding_bytes[0] not in (0x00, 0x55, 0xAA, 0xCC, 0xFF):
+                        return None
+                    
+                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload_extracted), [can_frame_entry])
 
         elif pci == 1:
             # First Frame
             if len(isotp_payload) >= 2:
                 dl = ((isotp_payload[0] & 0x0F) << 8) | isotp_payload[1]
-                self.isotp_sessions[session_key] = {
-                    "dl": dl,
-                    "data": bytearray(isotp_payload[2:]),
-                }
+                if dl > (7 if self.addressing == "standard" else 6):
+                    self.isotp_sessions[session_key] = {
+                        "dl": dl,
+                        "data": bytearray(isotp_payload[2:]),
+                        "sn": 1,
+                        "can_frames": [can_frame_entry]
+                    }
 
         elif pci == 2:
             # Consecutive Frame
             if session_key in self.isotp_sessions:
-                self.isotp_sessions[session_key]["data"].extend(isotp_payload[1:])
-                if (
-                    len(self.isotp_sessions[session_key]["data"])
-                    >= self.isotp_sessions[session_key]["dl"]
-                ):
-                    full_data = self.isotp_sessions[session_key]["data"][
-                        : self.isotp_sessions[session_key]["dl"]
-                    ]
+                sn = isotp_payload[0] & 0x0F
+                expected_sn = self.isotp_sessions[session_key]["sn"]
+                
+                if sn == expected_sn:
+                    self.isotp_sessions[session_key]["data"].extend(isotp_payload[1:])
+                    self.isotp_sessions[session_key]["sn"] = (sn + 1) & 0x0F
+                    self.isotp_sessions[session_key]["can_frames"].append(can_frame_entry)
+                    
+                    if len(self.isotp_sessions[session_key]["data"]) >= self.isotp_sessions[session_key]["dl"]:
+                        full_data = self.isotp_sessions[session_key]["data"][: self.isotp_sessions[session_key]["dl"]]
+                        frames = self.isotp_sessions[session_key]["can_frames"]
+                        del self.isotp_sessions[session_key]
+                        return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(full_data), frames)
+                else:
                     del self.isotp_sessions[session_key]
-                    return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(full_data))
+
+        elif pci == 3:
+            # Flow Control
+            fs = isotp_payload[0] & 0x0F
+            if fs <= 2 and len(isotp_payload) >= 3:
+                padding_bytes = isotp_payload[3:]
+                if len(padding_bytes) > 1 and len(set(padding_bytes)) > 1:
+                    return None
+                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload[:3]), [can_frame_entry])
                     
         return None
 
@@ -509,9 +576,11 @@ class TraceAnalyzer:
                 pkt.direction = direction
                 self.can_hook(pkt)
 
-            isotp_msg = self.process_isotp(
-                msg.timestamp, direction, arb_id, msg.data
-            )
+            isotp_msg = None
+            if self.is_isotp_id(arb_id):
+                isotp_msg = self.process_isotp(
+                    msg.timestamp, direction, arb_id, msg.data
+                )
 
             if isotp_msg:
                 self.isotp_count += 1
@@ -584,6 +653,8 @@ if __name__ == "__main__":
             addressing=args.addressing,
             defs_file=args.defs,
             filter_file=args.filter,
+            physical_ids=getattr(args, "physical_ids", None),
+            functional_ids=getattr(args, "functional_ids", None),
             can_hook=can_hook,
             isotp_hook=isotp_hook,
             kwp_hook=kwp_hook,
