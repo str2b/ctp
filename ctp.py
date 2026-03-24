@@ -1,17 +1,16 @@
 """CAN Trace Analyzer — a modular streaming pipeline for CAN/ISOTP/KWP analysis."""
 
+import abc
 import argparse
+import importlib.util
+import json
+import os
 import re
 import sys
-import json
-import importlib.util
-import os
+
 import can
 from scapy.all import Raw
 from scapy.contrib.automotive.kwp import KWP
-
-
-import abc
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +199,9 @@ class DefsEngine:
             return service_def, service_def.get("name", f"CustomService_{hex_key}")
         return None, None
 
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     def parse_payload(self, payload_bytes, base_info):
-        """Maps payload bytes to named parameters using JSON definitions. Returns enriched info or None."""
+        """Maps payload bytes to named parameters using JSON definitions."""
         if not self.defs or len(payload_bytes) < 1:
             return None
 
@@ -237,6 +237,7 @@ class DefsEngine:
                     continue
                 hex_val_str = f"0x{int_val:02X}"
                 cases = param["mux"]
+                # pylint: disable=too-many-nested-blocks
                 matched_mux = (
                     cases.get(hex_val_str)
                     or cases.get(str(int_val))
@@ -326,6 +327,7 @@ class ISOTPReassembler:
             return True
         return False
 
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     def process(self, can_frame):  # pylint: disable=too-many-return-statements
         """Process a CANFrame. Returns an ISOTPMessage on reassembly completion, or None."""
         payload = can_frame.data
@@ -535,6 +537,8 @@ class KWPDecoder:
 class TraceAnalyzer:
     """Orchestrates the CAN → ISOTP → KWP protocol pipeline over a file or live bus."""
 
+    # pylint: disable=too-many-instance-attributes
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
         self,
         trace_file=None,
@@ -694,7 +698,8 @@ def setup_parser():
     )
     parser.add_argument(
         "--functional-ids", nargs="+",
-        help="Optional list of functional CAN Arbitration IDs (hex or decimal) to natively parse as ISO-TP.",
+        help="Optional list of functional CAN Arbitration IDs (hex or decimal) "
+             "to natively parse as ISO-TP.",
     )
     parser.add_argument(
         "--hook",
@@ -721,7 +726,8 @@ def main():
     if known_args.hook:
         hook_path = os.path.abspath(known_args.hook)
         try:
-            spec = importlib.util.spec_from_file_location("plugin_hook", hook_path)
+            name = "plugin_hook"
+            spec = importlib.util.spec_from_file_location(name, hook_path)
             hook_mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(hook_mod)
 
@@ -736,7 +742,10 @@ def main():
 
             print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(f"Failed to load hook plugin {known_args.hook}: {e}", file=sys.stderr)
+            print(
+                f"Failed to load hook plugin {known_args.hook}: {e}",
+                file=sys.stderr
+            )
 
     args = arg_parser.parse_args()
 

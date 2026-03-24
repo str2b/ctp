@@ -30,9 +30,9 @@ def add_arguments(parser):
         "-p",
         "--print",
         nargs="+",
-        choices=["raw", "isotp", "kwp"],
-        default=["isotp"],
-        help="[Plugin] Which layers to print output for (default: isotp)",
+        choices=["can", "isotp", "kwp"],
+        default=["kwp"],
+        help="[Plugin] Which layers to print output for (default: kwp)",
     )
     parser.add_argument(
         "-o", "--output", help="[Plugin] Optional file to redirect stdout to natively."
@@ -45,7 +45,9 @@ def init(args):
         _state["print_layers"] = args.print
 
     if hasattr(args, "output") and args.output:
-        _state["out_file"] = open(args.output, "w", encoding="utf-8")  # pylint: disable=consider-using-with
+        _state["out_file"] = open(
+            args.output, "w", encoding="utf-8"
+        )  # pylint: disable=consider-using-with
         sys.stdout = _state["out_file"]
 
 
@@ -59,28 +61,37 @@ def teardown():
 
 def on_can_message(can_frame):
     """Optional hook for raw CAN packets."""
-    if "raw" not in _state["print_layers"]:
+    if "can" not in _state["print_layers"]:
         return
 
+    hex_data = " ".join([f"{b:02X}" for b in can_frame.data])
     print(
         f"[{can_frame.timestamp:15.6f}] {can_frame.direction:2}"
         f" | CAN ID 0x{can_frame.arb_id:03X}"
-        f" | len={len(can_frame.data)} | {can_frame.data.hex()}"
+        f" | len={len(can_frame.data)} | {hex_data}"
     )
 
 
-def on_isotp_message(isotp_pkt):
+def on_isotp_message(isotp_msg):
     """Optional hook for ISOTP payloads."""
     if "isotp" not in _state["print_layers"]:
         return
 
-    dir_flag = getattr(isotp_pkt, "direction", None) or "??"
-    ts = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
-    length = len(isotp_pkt.payload_bytes)
-    payload_hex = isotp_pkt.payload_bytes.hex()
-    if len(payload_hex) > 64:
-        payload_hex = payload_hex[:64] + f"...(+{(len(payload_hex)-64)//2} bytes)"
-    print(f"[{ts:15.6f}] {dir_flag:2} | ISOTP Length: {length:4} bytes | {payload_hex}")
+    ts = isotp_msg.time
+    dir_flag = isotp_msg.direction
+    length = len(isotp_msg.data)
+    frame_count = len(getattr(isotp_msg, "can_frames", []))
+    suffix = f" (from {frame_count} frames)" if frame_count > 1 else ""
+
+    payload_hex = " ".join([f"{b:02X}" for b in isotp_msg.data])
+    if len(payload_hex) > 48:
+        payload_hex = payload_hex[:48] + "..."
+
+    print(
+        f"[{ts:15.6f}] {dir_flag:2}"
+        f" | ISOTP [-> 0x{isotp_msg.tgt_addr:02X}]"
+        f" | {length:4} bytes{suffix} | {payload_hex}"
+    )
 
 
 def format_params(params_dict):

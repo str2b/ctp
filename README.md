@@ -130,7 +130,7 @@ Available optional functions in the plugin:
 
 ---
 
-## Plugin: `kwp_logger_hook.py`
+## Plugin: `trace_printer.py`
 A plugin for generic KWP traces.
 
 ### Arguments
@@ -161,7 +161,7 @@ A synthetic CAN trace file used to verify the analyzer logic. It contains no rea
 
 Run the verification:
 ```bash
-python ctp.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook kwp_logger_hook.py -p isotp -p kwp
+python ctp.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook trace_printer.py -p can isotp kwp
 ```
 
 See [examples/](examples/) for configuration templates and a test trace.
