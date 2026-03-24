@@ -57,16 +57,15 @@ def teardown():
         _state["out_file"] = None
 
 
-def on_can_message(can_pkt):
+def on_can_message(can_frame):
     """Optional hook for raw CAN packets."""
     if "raw" not in _state["print_layers"]:
         return
 
-    dir_flag = getattr(can_pkt, "direction", None) or "??"
-    ts = can_pkt.time if hasattr(can_pkt, "time") else 0.0
     print(
-        f"[{ts:15.6f}] {dir_flag:2} | CAN ID 0x{can_pkt.identifier:03X}"
-        f" | len={len(can_pkt.data)} | {can_pkt.data.hex()}"
+        f"[{can_frame.timestamp:15.6f}] {can_frame.direction:2}"
+        f" | CAN ID 0x{can_frame.arb_id:03X}"
+        f" | len={len(can_frame.data)} | {can_frame.data.hex()}"
     )
 
 

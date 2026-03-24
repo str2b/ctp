@@ -8,7 +8,6 @@ import importlib.util
 import os
 import can
 from scapy.all import Raw
-from scapy.layers.can import CAN
 from scapy.contrib.automotive.kwp import KWP
 
 
@@ -18,6 +17,7 @@ from scapy.contrib.automotive.kwp import KWP
 
 class CANFrame:
     """Wraps a raw can.Message with a resolved direction field."""
+    layer = "can"
 
     def __init__(self, arb_id, data, timestamp, direction):
         self.arb_id = arb_id
@@ -25,9 +25,14 @@ class CANFrame:
         self.timestamp = timestamp
         self.direction = direction
 
+    def filter_attrs(self):
+        """Attributes exposed to FilterEngine for rule evaluation."""
+        return {"id": self.arb_id, "payload": self.data}
+
 
 class ISOTPMessage:
     """Carries a fully reassembled ISOTP data payload and its metadata."""
+    layer = "isotp"
 
     def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes, can_frames=None):
         self.rx_id = rx_id
@@ -37,9 +42,14 @@ class ISOTPMessage:
         self.payload_bytes = payload_bytes
         self.can_frames = can_frames or []
 
+    def filter_attrs(self):
+        """Attributes exposed to FilterEngine for rule evaluation."""
+        return {"payload": self.payload_bytes}
+
 
 class KWPMessage:
     """Carries a decoded KWP service message and its metadata."""
+    layer = "kwp"
 
     def __init__(self, isotp_msg, service_hex, service_name, params, raw_pkt):
         self.isotp_msg = isotp_msg
@@ -51,6 +61,15 @@ class KWPMessage:
         self.service_name = service_name
         self.params = params
         self.raw_pkt = raw_pkt
+
+    def filter_attrs(self):
+        """Attributes exposed to FilterEngine for rule evaluation."""
+        return {
+            "src": self.src,
+            "tgt": self.tgt,
+            "service": f"0x{self.service_hex:0X}",
+            "payload": self.isotp_msg.payload_bytes,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -78,22 +97,24 @@ class FilterEngine:
             print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
             sys.exit(1)
 
-    def should_drop(self, layer, **kwargs):
-        """Returns True if the frame should be discarded according to the filter rules."""
+    def should_drop(self, message):
+        """Returns True if the message should be discarded according to the filter rules."""
         if not self.rules:
             return False
 
+        layer = message.layer
         layer_rules = [r for r in self.rules if r.get("layer", "").lower() == layer]
         if not layer_rules:
             return False
 
+        attrs = message.filter_attrs()
         rule_matched = False
         for rule in layer_rules:
             rule_matches = True
             for key, expected_val in rule.items():
                 if key == "layer":
                     continue
-                val = kwargs.get(key)
+                val = attrs.get(key)
                 if val is None:
                     rule_matches = False
                     break
@@ -240,8 +261,10 @@ class DefsEngine:
 class ISOTPReassembler:
     """Stateful ISOTP session reassembler. Consumes CANFrames, yields ISOTPMessage on completion."""
 
-    def __init__(self, addressing="standard", physical_ids=None, functional_ids=None):
+    def __init__(self, addressing="standard", physical_ids=None, functional_ids=None,
+                 session_timeout=2.0):
         self.addressing = addressing.lower()
+        self.session_timeout = session_timeout  # seconds; 0 disables timeout eviction
         self._sessions = {}
         self._id_to_target = {}
         self._use_custom_ids = physical_ids is not None or functional_ids is not None
@@ -268,7 +291,7 @@ class ISOTPReassembler:
             return True
         return False
 
-    def process(self, can_frame):
+    def process(self, can_frame):  # pylint: disable=too-many-return-statements
         """Process a CANFrame. Returns an ISOTPMessage on reassembly completion, or None."""
         payload = can_frame.data
         arb_id = can_frame.arb_id
@@ -294,6 +317,14 @@ class ISOTPReassembler:
 
         if len(isotp_payload) == 0:
             return None
+
+        if self.session_timeout > 0:
+            stale = [
+                k for k, v in self._sessions.items()
+                if timestamp - v["started"] > self.session_timeout
+            ]
+            for k in stale:
+                del self._sessions[k]
 
         pci = isotp_payload[0] >> 4
         can_frame_entry = (timestamp, direction, arb_id, payload)
@@ -325,6 +356,7 @@ class ISOTPReassembler:
                         "dl": dl,
                         "data": bytearray(isotp_payload[2:]),
                         "sn": 1,
+                        "started": timestamp,
                         "can_frames": [can_frame_entry],
                     }
 
@@ -474,7 +506,6 @@ class TraceAnalyzer:
         interface=None,
         channel=None,
         bitrate=None,
-        verbose=False,
         addressing="standard",
         defs_file=None,
         filter_file=None,
@@ -488,7 +519,6 @@ class TraceAnalyzer:
         self.interface = interface
         self.channel = channel
         self.bitrate = bitrate
-        self.verbose = verbose
 
         self.filter = FilterEngine(filter_file)
         self.defs = DefsEngine(defs_file)
@@ -511,58 +541,53 @@ class TraceAnalyzer:
         self.isotp_count = 0
         self.kwp_count = 0
 
-        for raw_msg in reader:
-            if raw_msg.is_error_frame or raw_msg.is_remote_frame:
-                continue
+        try:
+            for raw_msg in reader:
+                if raw_msg.is_error_frame or raw_msg.is_remote_frame:
+                    continue
 
-            # ── CAN layer ────────────────────────────────────────────────────
-            self.can_count += 1
-            direction = "Rx" if raw_msg.is_rx else "Tx"
-            can_frame = CANFrame(
-                raw_msg.arbitration_id, raw_msg.data, raw_msg.timestamp, direction
-            )
+                # ── CAN layer ────────────────────────────────────────────────────
+                self.can_count += 1
+                direction = "Rx" if raw_msg.is_rx else "Tx"
+                can_frame = CANFrame(
+                    raw_msg.arbitration_id, raw_msg.data, raw_msg.timestamp, direction
+                )
 
-            if self.filter.should_drop("can", id=can_frame.arb_id, payload=can_frame.data):
-                continue
+                if self.filter.should_drop(can_frame):
+                    continue
 
-            if self.can_hook:
-                scapy_pkt = CAN(identifier=can_frame.arb_id, data=can_frame.data)
-                scapy_pkt.time = can_frame.timestamp
-                scapy_pkt.direction = can_frame.direction
-                self.can_hook(scapy_pkt)
+                if self.can_hook:
+                    self.can_hook(can_frame)
 
-            # ── ISOTP layer ──────────────────────────────────────────────────
-            if not self.reassembler.is_isotp_id(can_frame.arb_id):
-                continue
+                # ── ISOTP layer ──────────────────────────────────────────────────
+                if not self.reassembler.is_isotp_id(can_frame.arb_id):
+                    continue
 
-            isotp_msg = self.reassembler.process(can_frame)
-            if not isotp_msg:
-                continue
+                isotp_msg = self.reassembler.process(can_frame)
+                if not isotp_msg:
+                    continue
 
-            self.isotp_count += 1
-            if self.filter.should_drop("isotp", payload=isotp_msg.payload_bytes):
-                continue
+                self.isotp_count += 1
+                if self.filter.should_drop(isotp_msg):
+                    continue
 
-            if self.isotp_hook:
-                self.isotp_hook(isotp_msg)
+                if self.isotp_hook:
+                    self.isotp_hook(isotp_msg)
 
-            # ── KWP layer ────────────────────────────────────────────────────
-            kwp_msg = self.kwp_decoder.process(isotp_msg)
-            if not kwp_msg:
-                continue
+                # ── KWP layer ────────────────────────────────────────────────────
+                kwp_msg = self.kwp_decoder.process(isotp_msg)
+                if not kwp_msg:
+                    continue
 
-            if self.filter.should_drop(
-                "kwp",
-                src=kwp_msg.src,
-                tgt=kwp_msg.tgt,
-                service=f"0x{kwp_msg.service_hex:0X}",
-                payload=isotp_msg.payload_bytes,
-            ):
-                continue
+                if self.filter.should_drop(kwp_msg):
+                    continue
 
-            self.kwp_count += 1
-            if self.kwp_hook:
-                self.kwp_hook(kwp_msg)
+                self.kwp_count += 1
+                if self.kwp_hook:
+                    self.kwp_hook(kwp_msg)
+
+        except KeyboardInterrupt:
+            print("\nCapture interrupted by user.", file=sys.stderr)
 
         print(
             f"Processed {self.can_count} CAN frames,"
@@ -572,31 +597,23 @@ class TraceAnalyzer:
 
     def _open_source(self):
         """Open and return a CAN message iterator (live bus or ASC file reader)."""
-        try:
-            if self.interface:
-                print(
-                    f"Opening LIVE interface '{self.interface}'"
-                    f" on channel '{self.channel}'...",
-                    file=sys.stderr,
-                )
-                kwargs = {"interface": self.interface, "channel": self.channel}
-                if self.bitrate:
-                    kwargs["bitrate"] = self.bitrate
-                return can.Bus(**kwargs)
-            if not self.trace_file:
-                print(
-                    "Error: specify a trace_file or a live --interface (with --channel).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        if self.interface:
             print(
-                f"Reading {self.trace_file} in real-time streaming mode...",
+                f"Opening LIVE interface '{self.interface}'"
+                f" on channel '{self.channel}'...",
                 file=sys.stderr,
             )
-            return can.ASCReader(self.trace_file)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            print(f"Error opening data source: {e}", file=sys.stderr)
-            sys.exit(1)
+            kwargs = {"interface": self.interface, "channel": self.channel}
+            if self.bitrate:
+                kwargs["bitrate"] = self.bitrate
+            return can.Bus(**kwargs)
+        if not self.trace_file:
+            raise ValueError("Specify a trace_file or a live --interface (with --channel).")
+        print(
+            f"Reading {self.trace_file} in real-time streaming mode...",
+            file=sys.stderr,
+        )
+        return can.ASCReader(self.trace_file)
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +725,6 @@ def main():
             interface=args.interface,
             channel=args.channel,
             bitrate=args.bitrate,
-            verbose=args.verbose,
             addressing=args.addressing,
             defs_file=args.defs,
             filter_file=args.filter,
