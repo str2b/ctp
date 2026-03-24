@@ -67,8 +67,8 @@ def on_can_message(can_frame):
     hex_data = " ".join([f"{b:02X}" for b in can_frame.data])
     print(
         f"[{can_frame.timestamp:15.6f}] {can_frame.direction:2}"
-        f" | CAN ID 0x{can_frame.arb_id:03X}"
-        f" | len={len(can_frame.data)} | {hex_data}"
+        f" | ID 0x{can_frame.arb_id:03X}"
+        f" | L:0x{len(can_frame.data):02X} | {hex_data}"
     )
 
 
@@ -81,16 +81,13 @@ def on_isotp_message(isotp_msg):
     dir_flag = isotp_msg.direction
     length = len(isotp_msg.data)
     frame_count = len(getattr(isotp_msg, "can_frames", []))
-    suffix = f" (from {frame_count} frames)" if frame_count > 1 else ""
 
     payload_hex = " ".join([f"{b:02X}" for b in isotp_msg.data])
-    if len(payload_hex) > 48:
-        payload_hex = payload_hex[:48] + "..."
 
     print(
         f"[{ts:15.6f}] {dir_flag:2}"
-        f" | ISOTP [-> 0x{isotp_msg.tgt_addr:02X}]"
-        f" | {length:4} bytes{suffix} | {payload_hex}"
+        f" [0x{isotp_msg.rx_id:03X}->0x{isotp_msg.tgt_addr:02X} | L:0x{length:03X}]"
+        f" [{payload_hex}]"
     )
 
 
@@ -142,6 +139,6 @@ def on_kwp_message(kwp_msg):
     print(
         f"[{kwp_msg.time:15.6f}]"
         f" [0x{kwp_msg.src:02X}->0x{kwp_msg.tgt:02X}"
-        f" | L:0x{len(data):04X}]"
+        f" | L:0x{len(data):03X}]"
         f" [{service_label}{trailer}]"
     )
