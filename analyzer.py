@@ -429,7 +429,7 @@ class KWPDecoder:
                     service_hex=defs_info["service_hex"],
                     service_name=defs_info["service_name"],
                     params=defs_info["params"],
-                    raw_pkt=Raw(payload_bytes),
+                    raw_pkt=payload_bytes,
                 )
 
             # Scapy fallback
