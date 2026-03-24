@@ -11,13 +11,30 @@ from scapy.all import Raw
 from scapy.contrib.automotive.kwp import KWP
 
 
+import abc
+
+
 # ---------------------------------------------------------------------------
 # Data classes — one per protocol layer
 # ---------------------------------------------------------------------------
 
-class CANFrame:
+class Filterable(abc.ABC):
+    """Interface for protocol layer objects that can be processed by FilterEngine."""
+
+    @property
+    @abc.abstractmethod
+    def layer(self) -> str:
+        """The protocol layer name (e.g. 'can', 'isotp', 'kwp')."""
+        return ""
+
+    @abc.abstractmethod
+    def filter_attrs(self) -> dict:
+        """Attributes exposed to FilterEngine for rule evaluation."""
+        return {}
+
+
+class CANFrame(Filterable):
     """Wraps a raw can.Message with a resolved direction field."""
-    layer = "can"
 
     def __init__(self, arb_id, data, timestamp, direction):
         self.arb_id = arb_id
@@ -25,14 +42,16 @@ class CANFrame:
         self.timestamp = timestamp
         self.direction = direction
 
-    def filter_attrs(self):
-        """Attributes exposed to FilterEngine for rule evaluation."""
+    @property
+    def layer(self) -> str:
+        return "can"
+
+    def filter_attrs(self) -> dict:
         return {"id": self.arb_id, "payload": self.data}
 
 
-class ISOTPMessage:
+class ISOTPMessage(Filterable):
     """Carries a fully reassembled ISOTP data payload and its metadata."""
-    layer = "isotp"
 
     def __init__(self, rx_id, tgt_addr, time, direction, data, can_frames=None):
         self.rx_id = rx_id
@@ -42,14 +61,16 @@ class ISOTPMessage:
         self.data = data
         self.can_frames = can_frames or []
 
-    def filter_attrs(self):
-        """Attributes exposed to FilterEngine for rule evaluation."""
+    @property
+    def layer(self) -> str:
+        return "isotp"
+
+    def filter_attrs(self) -> dict:
         return {"payload": self.data}
 
 
-class KWPMessage:
+class KWPMessage(Filterable):
     """Carries a decoded KWP service message and its metadata."""
-    layer = "kwp"
 
     def __init__(self, isotp_msg, service_hex, service_name, params, scapy_pkt=None):
         self.isotp_msg = isotp_msg
@@ -62,6 +83,10 @@ class KWPMessage:
         self.params = params
         self.data = isotp_msg.data
         self._scapy_pkt = scapy_pkt
+
+    @property
+    def layer(self) -> str:
+        return "kwp"
 
     @property
     def packet(self):
@@ -105,7 +130,7 @@ class FilterEngine:
             print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
             sys.exit(1)
 
-    def should_drop(self, message):
+    def should_drop(self, message: Filterable):
         """Returns True if the message should be discarded according to the filter rules."""
         if not self.rules:
             return False
