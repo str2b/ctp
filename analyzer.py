@@ -34,24 +34,24 @@ class ISOTPMessage:
     """Carries a fully reassembled ISOTP data payload and its metadata."""
     layer = "isotp"
 
-    def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes, can_frames=None):
+    def __init__(self, rx_id, tgt_addr, time, direction, data, can_frames=None):
         self.rx_id = rx_id
         self.tgt_addr = tgt_addr
         self.time = time
         self.direction = direction
-        self.payload_bytes = payload_bytes
+        self.data = data
         self.can_frames = can_frames or []
 
     def filter_attrs(self):
         """Attributes exposed to FilterEngine for rule evaluation."""
-        return {"payload": self.payload_bytes}
+        return {"payload": self.data}
 
 
 class KWPMessage:
     """Carries a decoded KWP service message and its metadata."""
     layer = "kwp"
 
-    def __init__(self, isotp_msg, service_hex, service_name, params, raw_pkt):
+    def __init__(self, isotp_msg, service_hex, service_name, params, scapy_pkt=None):
         self.isotp_msg = isotp_msg
         self.src = isotp_msg.rx_id & 0xFF
         self.tgt = isotp_msg.tgt_addr
@@ -60,7 +60,15 @@ class KWPMessage:
         self.service_hex = service_hex
         self.service_name = service_name
         self.params = params
-        self.raw_pkt = raw_pkt
+        self.data = isotp_msg.data
+        self._scapy_pkt = scapy_pkt
+
+    @property
+    def packet(self):
+        """Uniform access to the Scapy KWP object (lazy-loaded if decoded via Defs)."""
+        if self._scapy_pkt is None:
+            self._scapy_pkt = KWP(self.data)
+        return self._scapy_pkt
 
     def filter_attrs(self):
         """Attributes exposed to FilterEngine for rule evaluation."""
@@ -68,7 +76,7 @@ class KWPMessage:
             "src": self.src,
             "tgt": self.tgt,
             "service": f"0x{self.service_hex:0X}",
-            "payload": self.isotp_msg.payload_bytes,
+            "payload": self.data,
         }
 
 
@@ -409,42 +417,42 @@ class KWPDecoder:
 
     def process(self, isotp_msg):
         """Decode an ISOTPMessage as KWP. Returns KWPMessage or None if not decodable."""
-        payload_bytes = isotp_msg.payload_bytes
-        if len(payload_bytes) < 1 or payload_bytes[0] not in range(0x10, 0xFF):
+        data = isotp_msg.data
+        if len(data) < 1 or data[0] not in range(0x10, 0xFF):
             return None
 
         try:
             base_info = {
                 "src": isotp_msg.rx_id & 0xFF,
                 "tgt": isotp_msg.tgt_addr,
-                "service_hex": payload_bytes[0],
+                "service_hex": data[0],
                 "service_name": "",
                 "params": {},
             }
 
-            defs_info = self.defs.parse_payload(payload_bytes, base_info)
+            defs_info = self.defs.parse_payload(data, base_info)
             if defs_info:
                 return KWPMessage(
                     isotp_msg=isotp_msg,
                     service_hex=defs_info["service_hex"],
                     service_name=defs_info["service_name"],
                     params=defs_info["params"],
-                    raw_pkt=payload_bytes,
+                    scapy_pkt=None,
                 )
 
             # Scapy fallback
-            scapy_pkt = KWP(payload_bytes)
+            scapy_pkt = KWP(data)
             service_hex, service_name, params = self._decode_via_scapy(scapy_pkt)
             return KWPMessage(
                 isotp_msg=isotp_msg,
                 service_hex=service_hex,
                 service_name=service_name,
                 params=params,
-                raw_pkt=scapy_pkt,
+                scapy_pkt=scapy_pkt,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(
-                f"Error decoding KWP 0x{payload_bytes[0]:02X} on 0x{isotp_msg.rx_id:X}: {e}",
+                f"Error decoding KWP 0x{data[0]:02X} on 0x{isotp_msg.rx_id:X}: {e}",
                 file=sys.stderr,
             )
             return None

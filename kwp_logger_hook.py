@@ -123,7 +123,7 @@ def on_kwp_message(kwp_msg):
     if "kwp" not in _state["print_layers"]:
         return
 
-    raw_payload = kwp_msg.isotp_msg.payload_bytes
+    data = kwp_msg.data
     params_str = format_params(kwp_msg.params)
     service_label = f"0x{kwp_msg.service_hex:02X} ({kwp_msg.service_name[:35]:<35})"
     trailer = f" | {params_str}" if params_str else ""
@@ -131,6 +131,6 @@ def on_kwp_message(kwp_msg):
     print(
         f"[{kwp_msg.time:15.6f}]"
         f" [0x{kwp_msg.src:02X}->0x{kwp_msg.tgt:02X}"
-        f" | L:0x{len(raw_payload):04X}]"
+        f" | L:0x{len(data):04X}]"
         f" [{service_label}{trailer}]"
     )
