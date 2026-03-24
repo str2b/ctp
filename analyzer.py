@@ -8,13 +8,14 @@ from scapy.contrib.automotive.kwp import KWP
 from scapy.contrib.isotp import ISOTP, ISOTPSession
 
 class ISOTPMessage:
-    def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes, can_frames=None):
+    def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes, can_frames=None, frame_type="data"):
         self.rx_id = rx_id
         self.tgt_addr = tgt_addr
         self.time = time
         self.direction = direction
         self.payload_bytes = payload_bytes
         self.can_frames = can_frames or []
+        self.frame_type = frame_type  # "data" | "flow_control"
 
 def setup_parser():
     parser = argparse.ArgumentParser(
@@ -281,13 +282,15 @@ class TraceAnalyzer:
                     del self.isotp_sessions[session_key]
 
         elif pci == 3:
-            # Flow Control
+            # Flow Control — ISOTP protocol frame only, must NOT reach KWP
             fs = isotp_payload[0] & 0x0F
             if fs <= 2 and len(isotp_payload) >= 3:
                 padding_bytes = isotp_payload[3:]
                 if len(padding_bytes) > 1 and len(set(padding_bytes)) > 1:
                     return None
-                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload[:3]), [can_frame_entry])
+                return ISOTPMessage(rx_id, target_addr, timestamp, direction,
+                                   bytes(isotp_payload[:3]), [can_frame_entry],
+                                   frame_type="flow_control")
                     
         return None
 
@@ -588,8 +591,10 @@ class TraceAnalyzer:
                     continue
                 if self.isotp_hook:
                     self.isotp_hook(isotp_msg)
-                
-                self.process_kwp(isotp_msg)
+
+                # Flow Control is an ISOTP transport layer mechanism — never forward to KWP
+                if isotp_msg.frame_type == "data":
+                    self.process_kwp(isotp_msg)
 
         print(
             f"Processed {self.can_count} CAN frames, yielding {self.isotp_count} ISOTPs and {self.kwp_count} KWPs.",
