@@ -119,21 +119,19 @@ def format_params(params_dict):
     return ", ".join(formatted_params)
 
 
-def on_kwp_message(_kwp_msg, parsed_info, isotp_pkt):
+def on_kwp_message(kwp_msg):
     """Main trace logger hook."""
     if "kwp" not in _state["print_layers"]:
         return
 
-    raw_payload = isotp_pkt.payload_bytes
-    timestamp = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
-
-    params_str = format_params(parsed_info["params"])
-    service_label = f"0x{parsed_info['service_hex']:02X} ({parsed_info['service_name'][:35]:<35})"
+    raw_payload = kwp_msg.isotp_msg.payload_bytes
+    params_str = format_params(kwp_msg.params)
+    service_label = f"0x{kwp_msg.service_hex:02X} ({kwp_msg.service_name[:35]:<35})"
     trailer = f" | {params_str}" if params_str else ""
 
     print(
-        f"[{timestamp:15.6f}]"
-        f" [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X}"
+        f"[{kwp_msg.time:15.6f}]"
+        f" [0x{kwp_msg.src:02X}->0x{kwp_msg.tgt:02X}"
         f" | L:0x{len(raw_payload):04X}]"
         f" [{service_label}{trailer}]"
     )
