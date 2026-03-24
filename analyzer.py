@@ -650,10 +650,6 @@ def setup_parser():
         help="Bitrate for live interfaces (e.g., 500000).",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="Print verbose full-packet Scapy dissected output",
-    )
-    parser.add_argument(
         "-A", "--addressing", choices=["standard", "extended"], default="standard",
         help="Type of ISOTP addressing layer (default: standard)",
     )
