@@ -10,46 +10,12 @@ Disclaimer: This started as a vibe-coding piece of script for some hobby analysi
 - **CAN Parsing:** Reads `.asc` trace files using `python-can`.
 - **ISOTP Reassembly:** Assembles ISOTP streams (supports standard and extended addressing).
 - **KWP2000 Extraction:** Parses KWP2000 services using Scapy or custom definitions.
+- **UDS Support:** Not implemented yet, but planned.
 - **Hook Architecture:** Extends functionality through python scripts.
-
-## Usage
-
-Example execution:
-```bash
-python ctp.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs custom_defs.json
-```
-
-See [examples/](examples/) for configuration templates and a test trace.
 
 ---
 
-## Examples
-
-The `examples/` directory contains templates for the filtering engine and custom KWP service definitions. 
-
-### 1. Filter Engine (`filter_demo.json`)
-Demonstrates supported logic for the `--filter` argument:
-- **Layer Targeting**: Rules for `can`, `isotp`, and `kwp` layers.
-- **Whitelist/Blacklist Modes**: Controlling the default drop behavior.
-- **Complex Constraints**: AND'ing multiple fields (e.g., `src` + `service` + `payload`).
-- **Regex Logic**: Pattern matching for hex payloads (e.g., `^10.*` for Diagnostic Session).
-
-### 2. Custom KWP Definitions (`kwp_defs_demo.json`)
-Demonstrates core semantics for the `--defs` argument:
-- **Static arg layouts**: Fixed-length parameters.
-- **Trailing payloads**: Using `length: -1` to capture remaining bytes.
-- **Enum Mapping**: Exact hex, integer, and range matches (`0x10-0x1F`).
-- **Conditional Layouts (`mux`)**: Dynamic branching based on a previous parameter's value (`switch_on`).
-
-### 3. Verification Trace (`smoke_test.asc`)
-A synthetic CAN trace file used to verify the analyzer logic. It contains no real vehicle data.
-
-Run the verification:
-```bash
-python ctp.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook kwp_logger_hook.py -p isotp -p kwp
-```
-
-### Arguments
+## Arguments
 - `trace_file`: Path to the `.asc` trace file (optional if using live interface).
 - `-i`, `--interface`: python-can interface (e.g., `pcan`, `socketcan`, `vector`).
 - `-c`, `--channel`: python-can channel (e.g., `vcan0`, `PCAN_USBBUS1`).
@@ -170,3 +136,32 @@ A plugin for generic KWP traces.
 ### Arguments
 - `-p`, `--print`: Layers to output (`raw`, `isotp`, `kwp`).
 - `-o`, `--output`: Redirect output to a file.
+
+
+## Examples
+
+The `examples/` directory contains templates for the filtering engine and custom KWP service definitions. 
+
+### 1. Filter Engine (`filter_demo.json`)
+Demonstrates supported logic for the `--filter` argument:
+- **Layer Targeting**: Rules for `can`, `isotp`, and `kwp` layers.
+- **Whitelist/Blacklist Modes**: Controlling the default drop behavior.
+- **Complex Constraints**: AND'ing multiple fields (e.g., `src` + `service` + `payload`).
+- **Regex Logic**: Pattern matching for hex payloads (e.g., `^10.*` for Diagnostic Session).
+
+### 2. Custom KWP Definitions (`kwp_defs_demo.json`)
+Demonstrates core semantics for the `--defs` argument:
+- **Static arg layouts**: Fixed-length parameters.
+- **Trailing payloads**: Using `length: -1` to capture remaining bytes.
+- **Enum Mapping**: Exact hex, integer, and range matches (`0x10-0x1F`).
+- **Conditional Layouts (`mux`)**: Dynamic branching based on a previous parameter's value (`switch_on`).
+
+### 3. Verification Trace (`smoke_test.asc`)
+A synthetic CAN trace file used to verify the analyzer logic. It contains no real vehicle data.
+
+Run the verification:
+```bash
+python ctp.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook kwp_logger_hook.py -p isotp -p kwp
+```
+
+See [examples/](examples/) for configuration templates and a test trace.
