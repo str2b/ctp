@@ -5,8 +5,6 @@ Now cleanly implements its own argument parsing and custom payload definitions!
 """
 
 import sys
-import json
-from scapy.all import Raw
 
 try:
     from scapy.contrib.automotive.bmw.definitions import (
@@ -19,9 +17,11 @@ except ImportError:
 
 id_to_dir = {}
 
-# Global configurations
-print_layers = ["kwp"]
-out_file = None
+# Module-level state (encapsulated in dict to avoid global statements)
+_state = {
+    "print_layers": ["kwp"],
+    "out_file": None,
+}
 
 
 def add_arguments(parser):
@@ -41,49 +41,41 @@ def add_arguments(parser):
 
 def init(args):
     """Called by the core analyzer after arguments are parsed."""
-    global print_layers, out_file
-
     if hasattr(args, "print") and args.print:
-        print_layers = args.print
-        
+        _state["print_layers"] = args.print
+
     if hasattr(args, "output") and args.output:
-        out_file = open(args.output, "w", encoding="utf-8")
-        sys.stdout = out_file
+        _state["out_file"] = open(args.output, "w", encoding="utf-8")  # pylint: disable=consider-using-with
+        sys.stdout = _state["out_file"]
 
 
 def teardown():
     """Called by the core analyzer upon completion."""
-    global out_file
-    if out_file:
+    if _state["out_file"]:
         sys.stdout = sys.__stdout__
-        out_file.close()
+        _state["out_file"].close()
+        _state["out_file"] = None
 
 
 def on_can_message(can_pkt):
     """Optional hook for raw CAN packets."""
-    if "raw" not in print_layers:
+    if "raw" not in _state["print_layers"]:
         return
 
-    #if not should_print("can", id=can_pkt.identifier, payload=can_pkt.data):
-    #    return
-
-    dir_flag = getattr(can_pkt, "direction", None)
-    if dir_flag is None or dir_flag == "??":
-        dir_flag = "??"
+    dir_flag = getattr(can_pkt, "direction", None) or "??"
     ts = can_pkt.time if hasattr(can_pkt, "time") else 0.0
     print(
-        f"[{ts:15.6f}] {dir_flag:2} | CAN ID 0x{can_pkt.identifier:03X} | len={len(can_pkt.data)} | {can_pkt.data.hex()}"
+        f"[{ts:15.6f}] {dir_flag:2} | CAN ID 0x{can_pkt.identifier:03X}"
+        f" | len={len(can_pkt.data)} | {can_pkt.data.hex()}"
     )
 
 
 def on_isotp_message(isotp_pkt):
     """Optional hook for ISOTP payloads."""
-    if "isotp" not in print_layers:
+    if "isotp" not in _state["print_layers"]:
         return
 
-    dir_flag = getattr(isotp_pkt, "direction", None)
-    if dir_flag is None or dir_flag == "??":
-        dir_flag = "??"
+    dir_flag = getattr(isotp_pkt, "direction", None) or "??"
     ts = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
     length = len(isotp_pkt.payload_bytes)
     payload_hex = isotp_pkt.payload_bytes.hex()
@@ -127,16 +119,21 @@ def format_params(params_dict):
     return ", ".join(formatted_params)
 
 
-def on_kwp_message(kwp_msg, parsed_info, isotp_pkt):
+def on_kwp_message(_kwp_msg, parsed_info, isotp_pkt):
     """Main trace logger hook."""
-    if "kwp" not in print_layers:
+    if "kwp" not in _state["print_layers"]:
         return
 
     raw_payload = isotp_pkt.payload_bytes
     timestamp = isotp_pkt.time if hasattr(isotp_pkt, "time") else 0.0
 
     params_str = format_params(parsed_info["params"])
+    service_label = f"0x{parsed_info['service_hex']:02X} ({parsed_info['service_name'][:35]:<35})"
+    trailer = f" | {params_str}" if params_str else ""
 
     print(
-        f"[{timestamp:15.6f}] [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X} | L:0x{len(raw_payload):04X}] [0x{parsed_info['service_hex']:02X} ({parsed_info['service_name'][:35]:<35}){' | ' + params_str if params_str else ''}]"
+        f"[{timestamp:15.6f}]"
+        f" [0x{parsed_info['src']:02X}->0x{parsed_info['tgt']:02X}"
+        f" | L:0x{len(raw_payload):04X}]"
+        f" [{service_label}{trailer}]"
     )

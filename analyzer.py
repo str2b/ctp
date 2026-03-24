@@ -1,4 +1,5 @@
 import argparse
+import re
 import sys
 import json
 import can
@@ -101,7 +102,7 @@ class TraceAnalyzer:
         self.bitrate = bitrate
         self.verbose = verbose
         self.addressing = addressing.lower()
-        
+
         self.use_custom_ids = physical_ids is not None or functional_ids is not None
         self.diagnostic_ids = set()
         for ids_list in (physical_ids, functional_ids):
@@ -111,17 +112,23 @@ class TraceAnalyzer:
                         self.diagnostic_ids.add(int(rxid, 16) if rxid.lower().startswith('0x') else int(rxid))
                     except Exception:
                         pass
-                        
+
         self.can_hook = can_hook
         self.isotp_hook = isotp_hook
         self.kwp_hook = kwp_hook
         self.id_to_target = {}
         self.id_to_dir = {}
 
+        # Runtime counters and ISOTP reassembly state (reset per analyze() call)
+        self.isotp_sessions = {}
+        self.can_count = 0
+        self.isotp_count = 0
+        self.kwp_count = 0
+
         self.custom_defs = {}
         if defs_file:
             try:
-                with open(defs_file, "r") as f:
+                with open(defs_file, "r", encoding="utf-8") as f:
                     self.custom_defs = json.load(f)
                 print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
             except Exception as e:
@@ -157,7 +164,6 @@ class TraceAnalyzer:
             return False
 
         rule_matched = False
-        import re
 
         for rule in layer_rules:
             rule_matches = True
@@ -196,14 +202,14 @@ class TraceAnalyzer:
     def is_isotp_id(self, arb_id):
         if self.use_custom_ids:
             return arb_id in self.diagnostic_ids
-            
+
         if 0x600 <= arb_id <= 0x6FF:
             return True
         if 0x7DF <= arb_id <= 0x7EF:
             return True
-        if (arb_id & 0x00FFFF00) in (0x00DA0000, 0x00DB0000):
+        if arb_id & 0x00FFFF00 in (0x00DA0000, 0x00DB0000):
             return True
-            
+
         return False
 
     def process_isotp(self, timestamp, direction, arb_id, payload):
@@ -236,9 +242,9 @@ class TraceAnalyzer:
             if 0 < dl <= len(isotp_payload) - 1:
                 if dl > (7 if self.addressing == "standard" else 6):
                     return None
-                    
+
                 isotp_payload_extracted = isotp_payload[1 : 1 + dl]
-                
+
                 # Validation for padding bytes.
                 padding_bytes = isotp_payload[1 + dl :]
                 if len(padding_bytes) > 0:
@@ -246,7 +252,7 @@ class TraceAnalyzer:
                         return None
                     if padding_bytes[0] not in (0x00, 0x55, 0xAA, 0xCC, 0xFF):
                         return None
-                    
+
                 return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload_extracted), [can_frame_entry])
 
         elif pci == 1:
@@ -266,12 +272,12 @@ class TraceAnalyzer:
             if session_key in self.isotp_sessions:
                 sn = isotp_payload[0] & 0x0F
                 expected_sn = self.isotp_sessions[session_key]["sn"]
-                
+
                 if sn == expected_sn:
                     self.isotp_sessions[session_key]["data"].extend(isotp_payload[1:])
                     self.isotp_sessions[session_key]["sn"] = (sn + 1) & 0x0F
                     self.isotp_sessions[session_key]["can_frames"].append(can_frame_entry)
-                    
+
                     if len(self.isotp_sessions[session_key]["data"]) >= self.isotp_sessions[session_key]["dl"]:
                         full_data = self.isotp_sessions[session_key]["data"][: self.isotp_sessions[session_key]["dl"]]
                         frames = self.isotp_sessions[session_key]["can_frames"]
@@ -290,7 +296,7 @@ class TraceAnalyzer:
                 return ISOTPMessage(rx_id, target_addr, timestamp, direction,
                                    bytes(isotp_payload[:3]), [can_frame_entry],
                                    frame_type="flow_control")
-                    
+
         return None
 
     def process_kwp(self, isotp_pkt):
@@ -609,8 +615,8 @@ if __name__ == "__main__":
     can_hook = None
     isotp_hook = None
     kwp_hook = None
-    kwp_fast_parse = None
     plugin_init = None
+    plugin_teardown = None
 
     if known_args.hook:
         import importlib.util
