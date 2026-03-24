@@ -299,20 +299,21 @@ class TraceAnalyzer:
 
         if len(payload_bytes) >= 1 and payload_bytes[0] in range(0x10, 0xFF):
             try:
+                src = isotp_pkt.rx_id & 0xFF
+                tgt_addr = isotp_pkt.tgt_addr
+                service_id = payload_bytes[0]
+
+                if self.should_drop(
+                    "kwp",
+                    src=src,
+                    tgt=tgt_addr,
+                    service=f"0x{service_id:0X}",
+                    payload=payload_bytes,
+                ):
+                    return
+
                 handled = False
                 if self.custom_defs:
-                    src = isotp_pkt.rx_id & 0xFF
-                    tgt_addr = isotp_pkt.tgt_addr
-                    service_id = payload_bytes[0]
-
-                    if self.should_drop(
-                        "kwp",
-                        src=src,
-                        tgt=tgt_addr,
-                        service=f"0x{service_id:0X}",
-                        payload=payload_bytes,
-                    ):
-                        return
 
                     basic_info = {
                         "src": src,
