@@ -169,39 +169,49 @@ class TraceAnalyzer:
             return not rule_matched
         return rule_matched
 
-    def process_isotp(self, timestamp, direction, arb_id, target_addr, payload):
+    def process_isotp(self, timestamp, direction, arb_id, payload):
         if len(payload) == 0:
             return None
 
         if self.addressing == "extended":
+            if len(payload) < 2:
+                return None
+            target_addr = payload[0]
+            self.id_to_target[arb_id] = target_addr
+            isotp_payload = payload[1:]
             session_key = (arb_id, target_addr)
             rx_id = session_key[0]
         else:
+            target_addr = self.id_to_target.get(arb_id, 0xFF)
+            isotp_payload = payload
             session_key = arb_id
             rx_id = session_key
 
-        pci = payload[0] >> 4
+        if len(isotp_payload) == 0:
+            return None
+
+        pci = isotp_payload[0] >> 4
 
         if pci == 0:
             # Single Frame
-            dl = payload[0] & 0x0F
-            if 0 < dl <= len(payload) - 1:
-                isotp_payload = payload[1 : 1 + dl]
-                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload))
+            dl = isotp_payload[0] & 0x0F
+            if 0 < dl <= len(isotp_payload) - 1:
+                isotp_payload_extracted = isotp_payload[1 : 1 + dl]
+                return ISOTPMessage(rx_id, target_addr, timestamp, direction, bytes(isotp_payload_extracted))
 
         elif pci == 1:
             # First Frame
-            if len(payload) >= 2:
-                dl = ((payload[0] & 0x0F) << 8) | payload[1]
+            if len(isotp_payload) >= 2:
+                dl = ((isotp_payload[0] & 0x0F) << 8) | isotp_payload[1]
                 self.isotp_sessions[session_key] = {
                     "dl": dl,
-                    "data": bytearray(payload[2:]),
+                    "data": bytearray(isotp_payload[2:]),
                 }
 
         elif pci == 2:
             # Consecutive Frame
             if session_key in self.isotp_sessions:
-                self.isotp_sessions[session_key]["data"].extend(payload[1:])
+                self.isotp_sessions[session_key]["data"].extend(isotp_payload[1:])
                 if (
                     len(self.isotp_sessions[session_key]["data"])
                     >= self.isotp_sessions[session_key]["dl"]
@@ -263,7 +273,7 @@ class TraceAnalyzer:
         """Extracts and formats KWP attributes into a dictionary for hooks to easily consume."""
         arb_id = getattr(isotp_pkt, "rx_id", 0)
         src = arb_id & 0xFF
-        tgt = self.id_to_target.get(arb_id, 0xFF)
+        tgt = isotp_pkt.tgt_addr
 
         service_name = kwp_msg.sprintf("%KWP.service%")
         service_hex = kwp_msg.fields.get("service", 0)
@@ -490,42 +500,18 @@ class TraceAnalyzer:
             direction = "Rx" if msg.is_rx else "Tx"
             self.id_to_dir[arb_id] = direction
 
-            isotp_msg = None
-            if self.addressing == "extended":
-                if len(msg.data) >= 2:
-                    target_addr = msg.data[0]
-                    self.id_to_target[arb_id] = target_addr
+            if self.should_drop("can", id=arb_id, payload=msg.data):
+                continue
 
-                    if self.should_drop("can", id=arb_id, payload=msg.data):
-                        continue
+            if self.can_hook:
+                pkt = CAN(identifier=arb_id, data=msg.data)
+                pkt.time = msg.timestamp
+                pkt.direction = direction
+                self.can_hook(pkt)
 
-                    if self.can_hook:
-                        pkt = CAN(identifier=arb_id, data=msg.data[1:])
-                        pkt.time = msg.timestamp
-                        pkt.direction = direction
-                        self.can_hook(pkt)
-
-                    isotp_msg = self.process_isotp(
-                        msg.timestamp, direction, arb_id, target_addr, msg.data[1:]
-                    )
-            else:
-                if self.should_drop("can", id=arb_id, payload=msg.data):
-                    continue
-
-                if self.can_hook:
-                    pkt = CAN(identifier=arb_id, data=msg.data)
-                    pkt.time = msg.timestamp
-                    pkt.direction = direction
-                    self.can_hook(pkt)
-
-                target_addr = self.id_to_target.get(arb_id, 0xFF)
-                isotp_msg = self.process_isotp(
-                    msg.timestamp,
-                    direction,
-                    arb_id,
-                    target_addr,
-                    msg.data,
-                )
+            isotp_msg = self.process_isotp(
+                msg.timestamp, direction, arb_id, msg.data
+            )
 
             if isotp_msg:
                 self.isotp_count += 1

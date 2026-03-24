@@ -64,8 +64,8 @@ def on_can_message(can_pkt):
     if "raw" not in print_layers:
         return
 
-    if not should_print("can", id=can_pkt.identifier, payload=can_pkt.data):
-        return
+    #if not should_print("can", id=can_pkt.identifier, payload=can_pkt.data):
+    #    return
 
     dir_flag = getattr(can_pkt, "direction", None)
     if dir_flag is None or dir_flag == "??":
