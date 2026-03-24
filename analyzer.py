@@ -2,10 +2,9 @@ import argparse
 import sys
 import json
 import can
-from scapy.all import sniff, Raw
+from scapy.all import Raw
 from scapy.layers.can import CAN
 from scapy.contrib.automotive.kwp import KWP
-from scapy.contrib.isotp import ISOTP, ISOTPSession
 
 class ISOTPMessage:
     def __init__(self, rx_id, tgt_addr, time, direction, payload_bytes, can_frames=None, frame_type="data"):
@@ -323,11 +322,11 @@ class TraceAnalyzer:
                         "params": {},
                     }
 
-                    fast_info = self.parse_custom_payload(payload_bytes, basic_info)
-                    if fast_info:
+                    defs_info = self.parse_custom_payload(payload_bytes, basic_info)
+                    if defs_info:
                         self.kwp_count += 1
                         if self.kwp_hook:
-                            self.kwp_hook(Raw(payload_bytes), fast_info, isotp_pkt)
+                            self.kwp_hook(Raw(payload_bytes), defs_info, isotp_pkt)
                         handled = True
 
                 if not handled:
@@ -338,7 +337,7 @@ class TraceAnalyzer:
                     if self.kwp_hook:
                         self.kwp_hook(kwp_msg, parsed_info, isotp_pkt)
             except Exception as e:
-                print(f"Error parsing KWP packet at {timestamp}: {e}", file=sys.stderr)
+                print(f"Error parsing KWP packet 0x{payload_bytes[0]:02X} on 0x{isotp_pkt.rx_id:X}: {e}", file=sys.stderr)
 
     def parse_kwp_message(self, kwp_msg, isotp_pkt):
         """Extracts and formats KWP attributes into a dictionary for hooks to easily consume."""
