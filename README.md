@@ -1,6 +1,6 @@
-# CAN Trace KWP Parser
+# CAN Trace Parser
 
-A Python tool for parsing CAN trace files (`.asc`), ISOTP payloads and KWP2000 messages. 
+A Python tool for parsing CAN traces (`.asc`), their ISOTP payloads and KWP2000 messages. 
 
 The analyzer extracts protocols and delegates logic to plugins via a hook architecture.
 
@@ -16,7 +16,7 @@ Disclaimer: This started as a vibe-coding piece of script for some hobby analysi
 
 Example execution:
 ```bash
-python analyzer.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs custom_defs.json
+python ctp.py trace.asc -A extended --hook kwp_logger_hook.py -p kwp --defs custom_defs.json
 ```
 
 See [examples/](examples/) for configuration templates and a test trace.
@@ -46,7 +46,7 @@ A synthetic CAN trace file used to verify the analyzer logic. It contains no rea
 
 Run the verification:
 ```bash
-python analyzer.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook kwp_logger_hook.py -p isotp -p kwp
+python ctp.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook kwp_logger_hook.py -p isotp -p kwp
 ```
 
 ### Arguments
