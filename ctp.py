@@ -190,13 +190,49 @@ class DefsEngine:
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
 
-    def lookup(self, service_id):
-        """Returns (service_def, service_name) for a service ID, or (None, None)."""
+    def lookup(self, service_id, base_info=None):
+        """Returns (service_def, service_name) for a service ID, or (None, None).
+        Supports dicts or lists of dicts for a service. Matches based on 'src' and 'tgt'."""
         services_dict = self.defs.get("services", self.defs)
         hex_key = f"0x{service_id:02X}"
-        service_def = services_dict.get(hex_key) or services_dict.get(str(service_id))
-        if service_def:
-            return service_def, service_def.get("name", f"CustomService_{hex_key}")
+        service_entry = services_dict.get(hex_key) or services_dict.get(str(service_id))
+        
+        if not service_entry:
+            return None, None
+
+        candidates = service_entry if isinstance(service_entry, list) else [service_entry]
+        best_match = None
+        best_score = -1
+        
+        msg_src = base_info.get("src") if base_info else None
+        msg_tgt = base_info.get("tgt") if base_info else None
+
+        for cand in candidates:
+            score = 0
+            cand_src = cand.get("src")
+            cand_tgt = cand.get("tgt")
+            
+            if cand_src is not None:
+                cand_src_val = int(cand_src, 16) if isinstance(cand_src, str) and cand_src.lower().startswith("0x") else int(cand_src)
+                if msg_src is not None and cand_src_val == msg_src:
+                    score += 1
+                else:
+                    continue  # strict mismatch
+                    
+            if cand_tgt is not None:
+                cand_tgt_val = int(cand_tgt, 16) if isinstance(cand_tgt, str) and cand_tgt.lower().startswith("0x") else int(cand_tgt)
+                if msg_tgt is not None and cand_tgt_val == msg_tgt:
+                    score += 1
+                else:
+                    continue  # strict mismatch
+            
+            if score > best_score:
+                best_score = score
+                best_match = cand
+
+        if best_match:
+            return best_match, best_match.get("name", f"CustomService_{hex_key}")
+            
         return None, None
 
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -205,7 +241,7 @@ class DefsEngine:
         if not self.defs or len(payload_bytes) < 1:
             return None
 
-        service_def, service_name = self.lookup(payload_bytes[0])
+        service_def, service_name = self.lookup(payload_bytes[0], base_info)
         if not service_def:
             return None
 
@@ -471,7 +507,7 @@ class KWPDecoder:
 
             # Scapy fallback
             scapy_pkt = KWP(data)
-            service_hex, service_name, params = self._decode_via_scapy(scapy_pkt)
+            service_hex, service_name, params = self._decode_via_scapy(scapy_pkt, base_info)
             return KWPMessage(
                 isotp_msg=isotp_msg,
                 service_hex=service_hex,
@@ -486,7 +522,7 @@ class KWPDecoder:
             )
             return None
 
-    def _decode_via_scapy(self, kwp_pkt):
+    def _decode_via_scapy(self, kwp_pkt, base_info):
         """Extract service id, name, and params dict from a Scapy KWP packet."""
         service_hex = kwp_pkt.fields.get("service", 0)
         service_name = kwp_pkt.sprintf("%KWP.service%")
@@ -495,7 +531,7 @@ class KWPDecoder:
             req_name = None
             if isinstance(service_hex, int) and service_hex > 0x40:
                 req_id = service_hex - 0x40
-                _, req_name = self.defs.lookup(req_id)
+                _, req_name = self.defs.lookup(req_id, base_info)
                 if not req_name:
                     try:
                         candidate = KWP(bytes([req_id])).sprintf("%KWP.service%")

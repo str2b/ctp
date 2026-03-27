@@ -46,10 +46,32 @@ Data flows through the pipeline as objects: `CANFrame` → `ISOTPMessage` → `K
 ## Custom Definitions (JSON)
 The analyzer maps service bytes using a JSON definition file provided via `--defs`. Matches bypass Scapy to reduce processing time.
 
+The `services` field is a dictionary mapping a Service ID (hex or decimal) to either a single definition object or a list of definition objects.
+When defining multiple objects for the same service (e.g. ECU-specific variants or positive responses), the analyzer ranks candidates using the `src` and `tgt` attributes, matching them against the lower byte of the CAN IDs. A definition with a fully matching `src` or `tgt` is preferred over a generic one.
+
 **Example Definition:**
 ```json
 {
   "services": {
+    "0x50": [
+      {
+        "name": "FictionalPositiveResponse_AA",
+        "src": "0xAA",
+        "args": {
+          "default": [
+            { "name": "status", "length": 1, "enum": {"0x01": "ok"} }
+          ]
+        }
+      },
+      {
+        "name": "FictionalPositiveResponse_Generic",
+        "args": {
+          "default": [
+            { "name": "status", "length": 1 }
+          ]
+        }
+      }
+    ],
     "0x99": {
       "name": "FictionalServiceKey",
       "args": {
@@ -77,9 +99,10 @@ The analyzer maps service bytes using a JSON definition file provided via `--def
   }
 }
 ```
-1. If the KWP service ID is `0x99`, it is identified as `FictionalServiceKey`.
-2. Based on payload length, the layout key is selected.
-3. **Conditional Muxing:** The `mux` object uses the `switch_on` tag to select the next parameters to parse.
+1. Handlers can be targeted precisely (`0x50` uses `src: "0xAA"` to override the generic `0x50` fallback).
+2. If the KWP service ID is `0x99`, it is identified as `FictionalServiceKey`.
+3. Based on payload length, the layout key is selected.
+4. **Conditional Muxing:** The `mux` object uses the `switch_on` tag to select the next parameters to parse.
 
 ### Enum Range Parsing
 The `enum` dictionary supports integer matches (`"0x0A": "foo"`) and numerical ranges (`"0x1F0A-0x1F0F": "group"`). 
