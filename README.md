@@ -1,10 +1,12 @@
 # CAN Trace Parser
 
-A Python tool for parsing CAN traces (`.asc`), their ISOTP payloads and KWP2000 messages. 
+A Python tool for parsing CAN traces (`.asc`), their ISOTP payloads and KWP2000 messages.
 
 The analyzer extracts protocols and delegates logic to plugins via a hook architecture.
 
-Disclaimer: This started as a vibe-coding piece of script for some hobby analysis project, so don't expect production-ready code.
+**Disclaimer:** This tool is for **educational and personal use only**. Use responsibly and only with authorization on systems you own or have explicit permission to analyze. 
+
+This started as a vibe coding hobby project and is provided as-is.
 
 ## Features
 - **CAN Parsing:** Reads `.asc` trace files using `python-can`.
@@ -16,16 +18,24 @@ Disclaimer: This started as a vibe-coding piece of script for some hobby analysi
 ---
 
 ## Arguments
-- `trace_file`: Path to the `.asc` trace file (optional if using live interface).
-- `-i`, `--interface`: python-can interface (e.g., `pcan`, `socketcan`, `vector`).
-- `-c`, `--channel`: python-can channel (e.g., `vcan0`, `PCAN_USBBUS1`).
-- `-b`, `--bitrate`: Bitrate for live interfaces (e.g., `500000`).
-- `-A`, `--addressing`: ISOTP addressing (default: `standard`, choices: `standard`, `extended`).
-- `-d`, `--defs <file.json>`: JSON defs file for KWP services.
-- `--filter <file.json>`: JSON filter definition file.
-- `--physical-ids <id1 id2 ...>`: Arbitration IDs for physical ISOTP.
-- `--functional-ids <id1 id2 ...>`: Arbitration IDs for functional ISOTP.
-- `--hook <file.py>`: Python plugin hook script.
+
+**Source (mutually exclusive, required):**
+- `-f`, `--trace-file <path>`: Path to `.asc` trace file
+- `-i`, `--interface <name>`: Live python-can interface (e.g., `pcan`, `socketcan`, `vector`)
+
+**Live Interface Options** (only with `--interface`):
+- `-c`, `--channel <channel>`: CAN channel (e.g., `vcan0`, `PCAN_USBBUS1`) — **required** when using live interface
+- `-b`, `--bitrate <rate>`: Bitrate for the interface (e.g., `500000`)
+
+**Diagnostic & Decoding:**
+- `-A`, `--addressing {standard,extended}`: ISOTP addressing mode (default: `standard`)
+- `-d`, `--defs <file.json>`: Custom KWP service definitions
+- `--filter <file.json>`: Payload filtering rules
+- `--physical-ids <id1 id2 ...>`: Arbitration IDs for physical ISOTP
+- `--functional-ids <id1 id2 ...>`: Arbitration IDs for functional ISOTP
+
+**Extensibility:**
+- `--hook <file.py>`: Python plugin hook script
 
 ---
 
@@ -184,7 +194,7 @@ A synthetic CAN trace file used to verify the analyzer logic. It contains no rea
 
 Run the verification:
 ```bash
-python ctp.py examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook trace_printer.py -p can isotp kwp
+python ctp.py --trace-file examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook trace_printer.py -p can isotp kwp
 ```
 
 See [examples/](examples/) for configuration templates and a test trace.
