@@ -1,6 +1,6 @@
 # CDT - CAN Diagnostic Tap
 
-A Python tool for analyzing CAN traces (`.asc`, `.blf`), their ISOTP payloads and diagnostic protocols (KWP2000, UDS-ready).
+A Python tool for analyzing CAN traces (`.asc`, `.blf`), their ISOTP payloads and diagnostic protocols like KWP2000 (UDS to come).
 
 The tap extracts protocol messages and fans out events to plugins via a plugin registry.
 
@@ -23,18 +23,19 @@ This started as a vibe coding hobby project and is provided as-is.
 - `-i`, `--interface <name>`: Live python-can interface (e.g., `pcan`, `socketcan`, `vector`)
 
 **Live Interface Options** (only with `--interface`):
-- `-c`, `--channel <channel>`: CAN channel (e.g., `vcan0`, `PCAN_USBBUS1`) — **required** when using live interface
+- `-c`, `--channel <channel>`: CAN channel (e.g., `vcan0`, `PCAN_USBBUS1`), required when using live interface
 - `-b`, `--bitrate <rate>`: Bitrate for the interface (e.g., `500000`)
 
 **Diagnostic & Decoding:**
 - `-a`, `--addressing {standard,extended}`: ISOTP addressing mode (default: `extended`)
+- `-p`, `--protocols {kwp,uds} [...]`: Protocols to decode (default: `kwp`). UDS is not yet implemented.
 - `-d`, `--defs <file.json>`: Custom KWP service definitions
 - `-f`, `--filter <file.json>`: Payload filtering rules
-- `--physical-ids <id1 id2 ...>`: Arbitration IDs for physical ISOTP
-- `--functional-ids <id1 id2 ...>`: Arbitration IDs for functional ISOTP
+- `-pids`, `--physical-ids <id1 id2 ...>`: Arbitration IDs for physical ISOTP
+- `-fids`, `--functional-ids <id1 id2 ...>`: Arbitration IDs for functional ISOTP
 
 **Extensibility:**
-- `-p`, `--plugin <file.py> [file.py ...]`: One or more Python plugin files
+- `-P`, `--plugin <file.py> [file.py ...]`: One or more Python plugin files
 
 ---
 
@@ -68,10 +69,11 @@ PluginRegistry (fan-out to all plugins)
 1. **FilterEngine**: JSON-based rule matching at each layer (CAN, ISOTP, protocol).
 2. **DefsEngine**: JSON-based parameter and enum decoding for protocols.
 3. **ISOTPReassembler**: Stateful reassembly of multi-frame CAN messages (ISO 15765-2, standard + extended addressing).
-4. **ProtocolRegistry**: Multi-protocol decoder registry pattern:
-   - Tries each registered ProtocolDecoder in order
-   - KWPDecoder: KWP2000 / ISO 14230 (active). Uses DefsEngine first, falls back to Scapy.
-   - UDSDecoder: WIP / not available yet
+4. **ProtocolRegistry**: Multi-protocol decoder registry (controlled by `--protocols`):
+   - Only registers decoders specified by `--protocols` (default: KWP only)
+   - Tries each registered ProtocolDecoder in order on each transport message
+   - KWPDecoder: KWP2000 / ISO 14230. Uses DefsEngine first, falls back to Scapy.
+   - UDSDecoder: planned for future implementation
 5. **PluginRegistry**: Fans out all decoded messages to every loaded plugin:
    - Each plugin implements optional callbacks: on_can_message(), on_isotp_message(), on_kwp_message(), etc.
    - Framework automatically dispatches to the correct handler for each layer.

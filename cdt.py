@@ -827,6 +827,11 @@ def setup_parser():
         help="Optional JSON filter engine configuration to dynamically route and drop payloads.",
     )
     parser.add_argument(
+        "-p", "--protocols", nargs="+", default=["kwp"],
+        choices=["kwp", "uds"],
+        help="Protocols to decode (default: kwp). UDS is not yet implemented.",
+    )
+    parser.add_argument(
         "-pids", "--physical-ids", nargs="+",
         help="Optional list of physical CAN Arbitration IDs (hex or decimal).",
     )
@@ -842,7 +847,7 @@ def setup_parser():
 def _add_plugin_argument(parser):
     """Add the plugin argument to a parser."""
     parser.add_argument(
-        "-p", "--plugin", nargs="+", default=[],
+        "-P", "--plugin", nargs="+", default=[],
         metavar="FILE",
         help="One or more Python plugin files (e.g. plugins/trace_printer.py).",
     )
@@ -880,9 +885,11 @@ def main():
         if args.bitrate:
             arg_parser.error("--bitrate can only be used with --interface.")
 
-    protocols = ProtocolRegistry().register(
-        KWPDecoder(DefsEngine(args.defs))
-    )
+    protocols = ProtocolRegistry()
+    if "kwp" in args.protocols:
+        protocols.register(KWPDecoder(DefsEngine(args.defs)))
+    if "uds" in args.protocols:
+        print("UDS decoder not yet implemented.", file=sys.stderr)
 
     plugins.init(args)
 
