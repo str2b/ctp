@@ -222,20 +222,28 @@ class DefsEngine:
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
 
-    def lookup(self, service_id: int, base_info: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    @staticmethod
+    def _parse_int(value: str | int) -> int:
+        """Parse a value as int, handling hex strings."""
+        if isinstance(value, str) and value.lower().startswith("0x"):
+            return int(value, 16)
+        return int(value)
+
+    def lookup(self, service_id: int, base_info: dict[str, Any] | None = None
+              ) -> tuple[dict[str, Any] | None, str | None]:
         """Returns (service_def, service_name) for a service ID, or (None, None).
         Supports dicts or lists of dicts for a service. Matches based on 'src' and 'tgt'."""
         services_dict = self.defs.get("services", self.defs)
         hex_key = f"0x{service_id:02X}"
         service_entry = services_dict.get(hex_key) or services_dict.get(str(service_id))
-        
+
         if not service_entry:
             return None, None
 
         candidates = service_entry if isinstance(service_entry, list) else [service_entry]
         best_match = None
         best_score = -1
-        
+
         msg_src = base_info.get("src") if base_info else None
         msg_tgt = base_info.get("tgt") if base_info else None
 
@@ -243,28 +251,28 @@ class DefsEngine:
             score = 0
             cand_src = cand.get("src")
             cand_tgt = cand.get("tgt")
-            
+
             if cand_src is not None:
-                cand_src_val = int(cand_src, 16) if isinstance(cand_src, str) and cand_src.lower().startswith("0x") else int(cand_src)
+                cand_src_val = self._parse_int(cand_src)
                 if msg_src is not None and cand_src_val == msg_src:
                     score += 1
                 else:
                     continue  # strict mismatch
-                    
+
             if cand_tgt is not None:
-                cand_tgt_val = int(cand_tgt, 16) if isinstance(cand_tgt, str) and cand_tgt.lower().startswith("0x") else int(cand_tgt)
+                cand_tgt_val = self._parse_int(cand_tgt)
                 if msg_tgt is not None and cand_tgt_val == msg_tgt:
                     score += 1
                 else:
                     continue  # strict mismatch
-            
+
             if score > best_score:
                 best_score = score
                 best_match = cand
 
         if best_match:
             return best_match, best_match.get("name", f"CustomService_{hex_key}")
-            
+
         return None, None
 
     def parse_payload(self, payload_bytes: bytes, base_info: dict[str, Any]) -> dict[str, Any] | None:
@@ -343,7 +351,7 @@ class DefsEngine:
             raw_val = payload_bytes[offset: offset + p_len]
             offset += p_len
 
-        if not (0 < p_len <= 8):
+        if p_len <= 0 or p_len > 8:
             return p_name, raw_val, offset
 
         int_val = int.from_bytes(raw_val, byteorder="big")
@@ -429,10 +437,14 @@ class ISOTPReassembler:
         self._evict_stale(frame.timestamp)
 
         pci = frame.isotp_payload[0] >> 4
-        if pci == 0: return self._handle_sf(frame)
-        if pci == 1: self._handle_ff(frame)
-        if pci == 2: return self._handle_cf(frame)
-        if pci == 3: self._handle_fc(frame)
+        if pci == 0:
+            return self._handle_sf(frame)
+        if pci == 1:
+            self._handle_ff(frame)
+        if pci == 2:
+            return self._handle_cf(frame)
+        if pci == 3:
+            self._handle_fc(frame)
         return None
 
     def _extract_addressing(self, can_frame: CANFrame) -> _ISOTPFrame | None:
@@ -773,7 +785,7 @@ class TraceAnalyzer:
                 if raw_msg.is_error_frame or raw_msg.is_remote_frame:
                     continue
 
-                #  CAN layer 
+                #  CAN layer
                 self.can_count += 1
                 direction = "Rx" if raw_msg.is_rx else "Tx"
                 can_frame = CANFrame(
@@ -785,7 +797,7 @@ class TraceAnalyzer:
 
                 self.plugins.dispatch(can_frame)
 
-                #  ISOTP layer 
+                #  ISOTP layer
                 if not self.reassembler.is_isotp_id(can_frame.arb_id):
                     continue
 
@@ -799,7 +811,7 @@ class TraceAnalyzer:
 
                 self.plugins.dispatch(isotp_msg)
 
-                #  Protocol layer 
+                #  Protocol layer
                 proto_msg = self.protocols.process(isotp_msg)
                 if not proto_msg:
                     continue
