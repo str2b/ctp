@@ -2,7 +2,7 @@
 
 A Python tool for parsing CAN traces (`.asc`, `.blf`), their ISOTP payloads and KWP2000 messages.
 
-The analyzer extracts protocols and delegates logic to plugins via a hook architecture.
+The analyzer extracts protocols and fans out events to plugins via a plugin registry.
 
 **Disclaimer:** This tool is for **educational and personal use only**. Use responsibly and only with authorization on systems you own or have explicit permission to analyze. 
 
@@ -13,8 +13,7 @@ This started as a vibe coding hobby project and is provided as-is.
 - **ISOTP Reassembly:** Assembles ISOTP streams (supports standard and extended addressing).
 - **KWP2000 Extraction:** Parses KWP2000 services using Scapy or custom definitions.
 - **UDS Support:** Not implemented yet, but planned.
-- **Hook Architecture:** Extends functionality through python scripts.
-
+- **Plugin System:** Extend functionality by loading one or more Python plugin files.
 ---
 
 ## Arguments
@@ -35,7 +34,7 @@ This started as a vibe coding hobby project and is provided as-is.
 - `--functional-ids <id1 id2 ...>`: Arbitration IDs for functional ISOTP
 
 **Extensibility:**
-- `--hook <file.py>`: Python plugin hook script
+- `--plugin <file.py> [file.py ...]`: One or more Python plugin files
 
 ---
 
@@ -46,10 +45,11 @@ The analyzer uses a layered pipeline:
 1. **`FilterEngine`**: JSON-based rule matching at each layer.
 2. **`DefsEngine`**: JSON-based KWP service and parameter decoding.
 3. **`ISOTPReassembler`**: Stateful reassembly of multi-frame CAN messages.
-4. **`KWPDecoder`**: Decoding using custom definitions or Scapy fallback.
-5. **`TraceAnalyzer`**: Orchestrates the pipeline from source to hooks.
+4. **`ProtocolRegistry`**: Tries each registered `ProtocolDecoder` in order; currently hosts `KWPDecoder` (Scapy + custom defs). Add a `UDSDecoder` here for UDS support.
+5. **`PluginRegistry`**: Fans out decoded messages to all loaded plugins via `on_{layer}_message()`.
+6. **`TraceAnalyzer`**: Orchestrates the pipeline from source to plugins.
 
-Data flows through the pipeline as objects: `CANFrame` → `ISOTPMessage` → `KWPMessage`.
+Data flows through the pipeline as typed objects: `CANFrame` → `ISOTPMessage` → `KWPMessage` (or future `UDSMessage`).
 
 ---
 
@@ -149,17 +149,19 @@ Example `filter.json`:
 
 ---
 
-## Hook Architecture
+## Plugin System
 
-### Hook API
-Available optional functions in the plugin:
+### Plugin API
+Each plugin is a plain Python file. All functions are optional:
 
-- `add_arguments(parser)`: Register CLI arguments.
+- `add_arguments(parser)`: Register CLI arguments with argparse.
 - `init(args)`: Initialize state after argument parsing.
 - `on_can_message(can_frame)`: Callback for `CANFrame` objects.
 - `on_isotp_message(isotp_msg)`: Callback for `ISOTPMessage` objects.
 - `on_kwp_message(kwp_msg)`: Callback for `KWPMessage` objects.
 - `teardown()`: Callback invoked before termination.
+
+Multiple plugins can be loaded simultaneously with `--plugin`. Each receives every event independently.
 
 ---
 
@@ -194,7 +196,7 @@ A synthetic CAN trace file used to verify the analyzer logic. It contains no rea
 
 Run the verification:
 ```bash
-python ctp.py --trace-file examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --hook trace_printer.py -p can isotp kwp
+python ctp.py --trace-file examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --plugin plugins/trace_printer.py -p can isotp kwp
 ```
 
 See [examples/](examples/) for configuration templates and a test trace.

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 import can
 from scapy.all import Raw
@@ -466,10 +467,42 @@ class ISOTPReassembler:
 
 
 # ---------------------------------------------------------------------------
-# KWPDecoder
+# Protocol Layer — registry pattern, multiple decoders active simultaneously
+#
+#   ProtocolDecoder (ABC)
+#   └── KWPDecoder   (KWP2000 / ISO 14230)
+#
+#   ProtocolRegistry   tries each decoder in order, dispatches first match
 # ---------------------------------------------------------------------------
 
-class KWPDecoder:
+class ProtocolDecoder(abc.ABC):
+    """Decodes ISOTPMessages into typed application-layer protocol messages."""
+
+    @abc.abstractmethod
+    def process(self, isotp_msg: ISOTPMessage) -> "Filterable | None":
+        """Return a decoded protocol message, or None if not applicable."""
+
+
+class ProtocolRegistry:
+    """Tries each ProtocolDecoder in order; dispatches the first successful result."""
+
+    def __init__(self):
+        self._decoders: list[ProtocolDecoder] = []
+
+    def register(self, decoder: ProtocolDecoder) -> "ProtocolRegistry":
+        """Add a decoder and return self for fluent chaining."""
+        self._decoders.append(decoder)
+        return self
+
+    def process(self, isotp_msg: ISOTPMessage) -> "Filterable | None":
+        for decoder in self._decoders:
+            result = decoder.process(isotp_msg)
+            if result is not None:
+                return result
+        return None
+
+
+class KWPDecoder(ProtocolDecoder):
     """Decodes KWP messages from ISOTPMessage payloads.
 
     Tries DefsEngine first for fast custom-JSON decoding; falls back to Scapy
@@ -567,13 +600,67 @@ class KWPDecoder:
 
 
 # ---------------------------------------------------------------------------
+# Plugin Registry — fan-out pattern, all plugins receive every event
+#
+#   PluginRegistry
+#   ├── load(path)            dynamically imports a plugin module
+#   ├── add_arguments(parser) lets plugins register their own CLI args
+#   ├── init(args)            initializes all plugins after arg parsing
+#   ├── dispatch(msg)         calls on_{layer}_message(msg) on each plugin
+#   └── teardown()            graceful shutdown for all plugins
+# ---------------------------------------------------------------------------
+
+class PluginRegistry:
+    """Loads plugin modules and fans out protocol events to all of them."""
+
+    def __init__(self):
+        self._plugins = []
+
+    def load(self, path: str) -> "PluginRegistry":
+        """Dynamically load a plugin from a file path. Returns self for chaining."""
+        abs_path = os.path.abspath(path)
+        name = f"ctp_plugin_{len(self._plugins)}"
+        spec = importlib.util.spec_from_file_location(name, abs_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self._plugins.append(mod)
+        print(f"Loaded plugin: {path}", file=sys.stderr)
+        return self
+
+    def add_arguments(self, parser):
+        """Let each plugin register its own CLI arguments."""
+        for plugin in self._plugins:
+            if hasattr(plugin, "add_arguments"):
+                plugin.add_arguments(parser)
+
+    def init(self, args):
+        """Initialize all plugins after CLI argument parsing."""
+        for plugin in self._plugins:
+            if hasattr(plugin, "init"):
+                plugin.init(args)
+
+    def teardown(self):
+        """Tear down all plugins in load order."""
+        for plugin in self._plugins:
+            if hasattr(plugin, "teardown"):
+                plugin.teardown()
+
+    def dispatch(self, msg: Filterable):
+        """Call on_{layer}_message(msg) on every plugin that implements it."""
+        handler = f"on_{msg.layer}_message"
+        for plugin in self._plugins:
+            fn = getattr(plugin, handler, None)
+            if fn:
+                fn(msg)
+
+
+# ---------------------------------------------------------------------------
 # TraceAnalyzer — pure pipeline orchestrator
 # ---------------------------------------------------------------------------
 
 class TraceAnalyzer:
-    """Orchestrates the CAN → ISOTP → KWP protocol pipeline over a file or live bus."""
+    """Orchestrates the CAN → ISOTP → Protocol pipeline over a file or live bus."""
 
-    # pylint: disable=too-many-instance-attributes
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
         self,
@@ -582,13 +669,11 @@ class TraceAnalyzer:
         channel=None,
         bitrate=None,
         addressing="standard",
-        defs_file=None,
         filter_file=None,
         physical_ids=None,
         functional_ids=None,
-        can_hook=None,
-        isotp_hook=None,
-        kwp_hook=None,
+        protocols=None,
+        plugins=None,
     ):
         self.trace_file = trace_file
         self.interface = interface
@@ -596,25 +681,19 @@ class TraceAnalyzer:
         self.bitrate = bitrate
 
         self.filter = FilterEngine(filter_file)
-        self.defs = DefsEngine(defs_file)
         self.reassembler = ISOTPReassembler(addressing, physical_ids, functional_ids)
-        self.kwp_decoder = KWPDecoder(self.defs)
-
-        self.can_hook = can_hook
-        self.isotp_hook = isotp_hook
-        self.kwp_hook = kwp_hook
+        self.protocols = protocols or ProtocolRegistry()
+        self.plugins = plugins or PluginRegistry()
 
         self.can_count = 0
         self.isotp_count = 0
-        self.kwp_count = 0
+        self.protocol_count = 0
 
     def analyze(self):
         """Open the data source and run the full protocol pipeline until exhausted."""
         reader = self._open_source()
         self.reassembler.reset()
-        self.can_count = 0
-        self.isotp_count = 0
-        self.kwp_count = 0
+        self.can_count = self.isotp_count = self.protocol_count = 0
 
         try:
             for raw_msg in reader:
@@ -631,8 +710,7 @@ class TraceAnalyzer:
                 if self.filter.should_drop(can_frame):
                     continue
 
-                if self.can_hook:
-                    self.can_hook(can_frame)
+                self.plugins.dispatch(can_frame)
 
                 # ── ISOTP layer ──────────────────────────────────────────────────
                 if not self.reassembler.is_isotp_id(can_frame.arb_id):
@@ -646,27 +724,25 @@ class TraceAnalyzer:
                 if self.filter.should_drop(isotp_msg):
                     continue
 
-                if self.isotp_hook:
-                    self.isotp_hook(isotp_msg)
+                self.plugins.dispatch(isotp_msg)
 
-                # ── KWP layer ────────────────────────────────────────────────────
-                kwp_msg = self.kwp_decoder.process(isotp_msg)
-                if not kwp_msg:
+                # ── Protocol layer ───────────────────────────────────────────────
+                proto_msg = self.protocols.process(isotp_msg)
+                if not proto_msg:
                     continue
 
-                if self.filter.should_drop(kwp_msg):
+                if self.filter.should_drop(proto_msg):
                     continue
 
-                self.kwp_count += 1
-                if self.kwp_hook:
-                    self.kwp_hook(kwp_msg)
+                self.protocol_count += 1
+                self.plugins.dispatch(proto_msg)
 
         except KeyboardInterrupt:
             print("\nCapture interrupted by user.", file=sys.stderr)
 
         print(
             f"Processed {self.can_count} CAN frames,"
-            f" yielding {self.isotp_count} ISOTPs and {self.kwp_count} KWPs.",
+            f" yielding {self.isotp_count} ISOTPs and {self.protocol_count} protocol messages.",
             file=sys.stderr,
         )
 
@@ -759,8 +835,9 @@ def setup_parser():
              "to natively parse as ISO-TP.",
     )
     parser.add_argument(
-        "--hook",
-        help="Optional Python file defining protocol hooks (e.g. on_kwp_message).",
+        "--plugin", nargs="+", default=[],
+        metavar="FILE",
+        help="One or more Python plugin files (e.g. plugins/trace_printer.py).",
     )
     return parser
 
@@ -770,44 +847,22 @@ def setup_parser():
 # ---------------------------------------------------------------------------
 
 def main():
-    """Load plugin, parse arguments, construct analyzer, and run the pipeline."""
-    # Pre-parse only for --hook before the main parser enforces required args.
+    """Build the plugin registry, parse arguments, assemble the pipeline, and run."""
+    # Pre-parse to discover plugins before the main parser enforces required args.
+    # Plugins may call add_arguments() to register their own flags.
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--hook")
+    pre_parser.add_argument("--plugin", nargs="+", default=[])
     pre_args, _ = pre_parser.parse_known_args()
 
-    arg_parser = setup_parser()
-
-    can_hook = None
-    isotp_hook = None
-    kwp_hook = None
-    plugin_init = None
-    plugin_teardown = None
-
-    if pre_args.hook:
-        hook_path = os.path.abspath(pre_args.hook)
+    plugins = PluginRegistry()
+    for path in pre_args.plugin:
         try:
-            name = "plugin_hook"
-            spec = importlib.util.spec_from_file_location(name, hook_path)
-            hook_mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(hook_mod)
-
-            if hasattr(hook_mod, "add_arguments"):
-                hook_mod.add_arguments(arg_parser)
-
-            can_hook = getattr(hook_mod, "on_can_message", None)
-            isotp_hook = getattr(hook_mod, "on_isotp_message", None)
-            kwp_hook = getattr(hook_mod, "on_kwp_message", None)
-            plugin_init = getattr(hook_mod, "init", None)
-            plugin_teardown = getattr(hook_mod, "teardown", None)
-
-            print(f"Loaded plugin hooks from {pre_args.hook}", file=sys.stderr)
+            plugins.load(path)
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(
-                f"Failed to load hook plugin {pre_args.hook}: {e}",
-                file=sys.stderr
-            )
+            print(f"Failed to load plugin {path}: {e}", file=sys.stderr)
 
+    arg_parser = setup_parser()
+    plugins.add_arguments(arg_parser)
     args = arg_parser.parse_args()
 
     if args.interface:
@@ -819,28 +874,27 @@ def main():
         if args.bitrate:
             arg_parser.error("--bitrate can only be used with --interface.")
 
-    if plugin_init:
-        plugin_init(args)
+    protocols = ProtocolRegistry().register(
+        KWPDecoder(DefsEngine(args.defs))
+    )
+
+    plugins.init(args)
 
     try:
-        analyzer = TraceAnalyzer(
+        TraceAnalyzer(
             trace_file=args.trace_file,
             interface=args.interface,
             channel=args.channel,
             bitrate=args.bitrate,
             addressing=args.addressing,
-            defs_file=args.defs,
             filter_file=args.filter,
             physical_ids=getattr(args, "physical_ids", None),
             functional_ids=getattr(args, "functional_ids", None),
-            can_hook=can_hook,
-            isotp_hook=isotp_hook,
-            kwp_hook=kwp_hook,
-        )
-        analyzer.analyze()
+            protocols=protocols,
+            plugins=plugins,
+        ).analyze()
     finally:
-        if plugin_teardown:
-            plugin_teardown()
+        plugins.teardown()
 
 
 if __name__ == "__main__":
