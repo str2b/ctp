@@ -1,5 +1,7 @@
 """CDT - CAN Diagnostic Tap. A modular streaming pipeline for CAN/ISOTP diagnostic analysis."""
 
+from __future__ import annotations
+
 import abc
 import argparse
 import importlib.util
@@ -8,11 +10,37 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Any, TypeAlias, TypedDict
 
 import can
 from scapy.all import Raw
 from scapy.contrib.automotive.kwp import KWP
+
+
+# ---------------------------------------------------------------------------
+# Type aliases and structured dicts
+# ---------------------------------------------------------------------------
+
+CanFrameEntry: TypeAlias = tuple[float, str, int, bytes]  # (timestamp, direction, arb_id, payload)
+SessionKey: TypeAlias = int | tuple[int, int]  # standard (int) or extended (arb_id, target_addr)
+
+
+class ServiceInfo(TypedDict, total=False):
+    """Service definition lookup result."""
+    service_hex: int
+    service_name: str
+    src: int
+    tgt: int
+    params: dict[str, Any]
+
+
+class ISOTPSession(TypedDict):
+    """Active ISOTP reassembly session."""
+    dl: int
+    data: bytearray
+    sn: int
+    started: float
+    can_frames: list[CanFrameEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -37,66 +65,68 @@ class Filterable(abc.ABC):
 class CANFrame(Filterable):
     """Wraps a raw can.Message with a resolved direction field."""
 
-    def __init__(self, arb_id, data, timestamp, direction):
-        self.arb_id = arb_id
-        self.data = data
-        self.timestamp = timestamp
-        self.direction = direction
+    def __init__(self, arb_id: int, data: bytes, timestamp: float, direction: str):
+        self.arb_id: int = arb_id
+        self.data: bytes = data
+        self.timestamp: float = timestamp
+        self.direction: str = direction
 
     @property
     def layer(self) -> str:
         return "can"
 
-    def filter_attrs(self) -> dict:
+    def filter_attrs(self) -> dict[str, Any]:
         return {"id": self.arb_id, "payload": self.data}
 
 
 class ISOTPMessage(Filterable):
     """Carries a fully reassembled ISOTP data payload and its metadata."""
 
-    def __init__(self, rx_id, tgt_addr, time, direction, data, can_frames=None):
-        self.rx_id = rx_id
-        self.tgt_addr = tgt_addr
-        self.time = time
-        self.direction = direction
-        self.data = data
-        self.can_frames = can_frames or []
+    def __init__(self, rx_id: int, tgt_addr: int, time: float, direction: str,
+                 data: bytes, can_frames: list[CanFrameEntry] | None = None):
+        self.rx_id: int = rx_id
+        self.tgt_addr: int = tgt_addr
+        self.time: float = time
+        self.direction: str = direction
+        self.data: bytes = data
+        self.can_frames: list[CanFrameEntry] = can_frames or []
 
     @property
     def layer(self) -> str:
         return "isotp"
 
-    def filter_attrs(self) -> dict:
+    def filter_attrs(self) -> dict[str, Any]:
         return {"payload": self.data}
 
 
 class KWPMessage(Filterable):
     """Carries a decoded KWP service message and its metadata."""
 
-    def __init__(self, isotp_msg, service_hex, service_name, params, scapy_pkt=None):
-        self.isotp_msg = isotp_msg
-        self.src = isotp_msg.rx_id & 0xFF
-        self.tgt = isotp_msg.tgt_addr
-        self.time = isotp_msg.time
-        self.direction = isotp_msg.direction
-        self.service_hex = service_hex
-        self.service_name = service_name
-        self.params = params
-        self.data = isotp_msg.data
-        self._scapy_pkt = scapy_pkt
+    def __init__(self, isotp_msg: ISOTPMessage, service_hex: int, service_name: str,
+                 params: dict[str, Any], scapy_pkt: Any = None):
+        self.isotp_msg: ISOTPMessage = isotp_msg
+        self.src: int = isotp_msg.rx_id & 0xFF
+        self.tgt: int = isotp_msg.tgt_addr
+        self.time: float = isotp_msg.time
+        self.direction: str = isotp_msg.direction
+        self.service_hex: int = service_hex
+        self.service_name: str = service_name
+        self.params: dict[str, Any] = params
+        self.data: bytes = isotp_msg.data
+        self._scapy_pkt: Any = scapy_pkt
 
     @property
     def layer(self) -> str:
         return "kwp"
 
     @property
-    def packet(self):
+    def packet(self) -> Any:
         """Uniform access to the Scapy KWP object (lazy-loaded if decoded via Defs)."""
         if self._scapy_pkt is None:
             self._scapy_pkt = KWP(self.data)
         return self._scapy_pkt
 
-    def filter_attrs(self):
+    def filter_attrs(self) -> dict[str, Any]:
         """Attributes exposed to FilterEngine for rule evaluation."""
         return {
             "src": self.src,
@@ -113,14 +143,14 @@ class KWPMessage(Filterable):
 class FilterEngine:
     """Loads a JSON filter definition and evaluates frames against its rules."""
 
-    def __init__(self, filter_file=None):
-        self.mode = "whitelist"
-        self.rules = []
+    def __init__(self, filter_file: str | None = None):
+        self.mode: str = "whitelist"
+        self.rules: list[dict[str, Any]] = []
         if not filter_file:
             return
         try:
             with open(filter_file, "r", encoding="utf-8") as f:
-                filter_def = json.load(f)
+                filter_def: dict[str, Any] = json.load(f)
             self.mode = filter_def.get("mode", "whitelist").lower()
             self.rules = filter_def.get("rules", [])
             print(
@@ -131,7 +161,7 @@ class FilterEngine:
             print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
             sys.exit(1)
 
-    def should_drop(self, message: Filterable):
+    def should_drop(self, message: Filterable) -> bool:
         """Returns True if the message should be discarded according to the filter rules."""
         if not self.rules:
             return False
@@ -181,8 +211,8 @@ class FilterEngine:
 class DefsEngine:
     """Loads a custom JSON service definition file and provides lookup and payload parsing."""
 
-    def __init__(self, defs_file=None):
-        self.defs = {}
+    def __init__(self, defs_file: str | None = None):
+        self.defs: dict[str, Any] = {}
         if not defs_file:
             return
         try:
@@ -192,7 +222,7 @@ class DefsEngine:
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
 
-    def lookup(self, service_id, base_info=None):
+    def lookup(self, service_id: int, base_info: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
         """Returns (service_def, service_name) for a service ID, or (None, None).
         Supports dicts or lists of dicts for a service. Matches based on 'src' and 'tgt'."""
         services_dict = self.defs.get("services", self.defs)
@@ -237,7 +267,7 @@ class DefsEngine:
             
         return None, None
 
-    def parse_payload(self, payload_bytes, base_info):
+    def parse_payload(self, payload_bytes: bytes, base_info: dict[str, Any]) -> dict[str, Any] | None:
         """Maps payload bytes to named parameters using JSON definitions."""
         if not self.defs or len(payload_bytes) < 1:
             return None
@@ -351,21 +381,21 @@ class _ISOTPFrame(NamedTuple):
     rx_id: int
     target_addr: int
     isotp_payload: bytes
-    session_key: object
+    session_key: SessionKey
     timestamp: float
     direction: str
-    frame_entry: tuple
+    frame_entry: CanFrameEntry
 
 
 class ISOTPReassembler:
     """Stateful ISOTP session reassembler. Consumes CANFrames, yields ISOTPMessage on completion."""
 
-    def __init__(self, addressing="standard", physical_ids=None, functional_ids=None,
-                 session_timeout=2.0):
-        self.addressing = addressing.lower()
-        self.session_timeout = session_timeout  # seconds; 0 disables timeout eviction
-        self._sessions = {}
-        self._id_to_target = {}
+    def __init__(self, addressing: str = "standard", physical_ids: list[str] | None = None,
+                 functional_ids: list[str] | None = None, session_timeout: float = 2.0):
+        self.addressing: str = addressing.lower()
+        self.session_timeout: float = session_timeout
+        self._sessions: dict[SessionKey, ISOTPSession] = {}
+        self._id_to_target: dict[int, int] = {}
         self._use_custom_ids = physical_ids is not None or functional_ids is not None
         self._diagnostic_ids = set()
         for ids_list in (physical_ids, functional_ids):
@@ -378,7 +408,7 @@ class ISOTPReassembler:
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
 
-    def is_isotp_id(self, arb_id):
+    def is_isotp_id(self, arb_id: int) -> bool:
         """Returns True if this arb_id should be treated as an ISOTP frame."""
         if self._use_custom_ids:
             return arb_id in self._diagnostic_ids
@@ -390,7 +420,7 @@ class ISOTPReassembler:
             return True
         return False
 
-    def process(self, can_frame):
+    def process(self, can_frame: CANFrame) -> ISOTPMessage | None:
         """Process a CANFrame. Returns an ISOTPMessage on reassembly completion, or None."""
         frame = self._extract_addressing(can_frame)
         if frame is None:
@@ -405,7 +435,7 @@ class ISOTPReassembler:
         if pci == 3: self._handle_fc(frame)
         return None
 
-    def _extract_addressing(self, can_frame):
+    def _extract_addressing(self, can_frame: CANFrame) -> _ISOTPFrame | None:
         """Resolve addressing fields from a CANFrame based on the configured mode.
 
         Returns an _ISOTPFrame or None if the frame is invalid.
@@ -443,7 +473,7 @@ class ISOTPReassembler:
             frame_entry=(timestamp, direction, arb_id, payload),
         )
 
-    def _evict_stale(self, timestamp):
+    def _evict_stale(self, timestamp: float):
         """Remove sessions that have exceeded the inactivity timeout."""
         if self.session_timeout <= 0:
             return
@@ -452,7 +482,7 @@ class ISOTPReassembler:
         for k in stale:
             del self._sessions[k]
 
-    def _handle_sf(self, frame: _ISOTPFrame):
+    def _handle_sf(self, frame: _ISOTPFrame) -> ISOTPMessage | None:
         """Handle a Single Frame (PCI=0). Returns ISOTPMessage or None."""
         max_sf_dl = 7 if self.addressing == "standard" else 6
         dl = frame.isotp_payload[0] & 0x0F
@@ -480,7 +510,7 @@ class ISOTPReassembler:
                 "can_frames": [frame.frame_entry],
             }
 
-    def _handle_cf(self, frame: _ISOTPFrame):
+    def _handle_cf(self, frame: _ISOTPFrame) -> ISOTPMessage | None:
         """Handle a Consecutive Frame (PCI=2). Returns ISOTPMessage on completion or None."""
         if frame.session_key not in self._sessions:
             return None
@@ -554,10 +584,10 @@ class KWPDecoder(ProtocolDecoder):
     or Scapy internals.
     """
 
-    def __init__(self, defs_engine):
-        self.defs = defs_engine
+    def __init__(self, defs_engine: DefsEngine) -> None:
+        self.defs: DefsEngine = defs_engine
 
-    def process(self, isotp_msg):
+    def process(self, isotp_msg: ISOTPMessage) -> KWPMessage | None:
         """Decode an ISOTPMessage as KWP. Returns KWPMessage or None if not decodable."""
         data = isotp_msg.data
         if len(data) < 1 or data[0] not in range(0x10, 0xFF):
@@ -599,7 +629,7 @@ class KWPDecoder(ProtocolDecoder):
             )
             return None
 
-    def _decode_via_scapy(self, kwp_pkt, base_info):
+    def _decode_via_scapy(self, kwp_pkt: Any, base_info: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
         """Extract service id, name, and params dict from a Scapy KWP packet."""
         service_hex = kwp_pkt.fields.get("service", 0)
         service_name = kwp_pkt.sprintf("%KWP.service%")
@@ -657,8 +687,8 @@ class KWPDecoder(ProtocolDecoder):
 class PluginRegistry:
     """Loads plugin modules and fans out protocol events to all of them."""
 
-    def __init__(self):
-        self._plugins = []
+    def __init__(self) -> None:
+        self._plugins: list[Any] = []
 
     def load(self, path: str) -> "PluginRegistry":
         """Dynamically load a plugin from a file path. Returns self for chaining."""
@@ -671,13 +701,13 @@ class PluginRegistry:
         print(f"Loaded plugin: {path}", file=sys.stderr)
         return self
 
-    def add_arguments(self, parser):
+    def add_arguments(self, parser: argparse.ArgumentParser):
         """Let each plugin register its own CLI arguments."""
         for plugin in self._plugins:
             if hasattr(plugin, "add_arguments"):
                 plugin.add_arguments(parser)
 
-    def init(self, args):
+    def init(self, args: argparse.Namespace):
         """Initialize all plugins after CLI argument parsing."""
         for plugin in self._plugins:
             if hasattr(plugin, "init"):
@@ -705,33 +735,32 @@ class PluginRegistry:
 class TraceAnalyzer:
     """Orchestrates the CAN -> ISOTP -> Protocol pipeline over a file or live bus."""
 
-    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
         self,
-        trace_file=None,
-        interface=None,
-        channel=None,
-        bitrate=None,
-        addressing="standard",
-        filter_file=None,
-        physical_ids=None,
-        functional_ids=None,
-        protocols=None,
-        plugins=None,
-    ):
-        self.trace_file = trace_file
-        self.interface = interface
-        self.channel = channel
-        self.bitrate = bitrate
+        trace_file: str | None = None,
+        interface: str | None = None,
+        channel: str | None = None,
+        bitrate: int | None = None,
+        addressing: str = "standard",
+        filter_file: str | None = None,
+        physical_ids: list[str] | None = None,
+        functional_ids: list[str] | None = None,
+        protocols: ProtocolRegistry | None = None,
+        plugins: PluginRegistry | None = None,
+    ) -> None:
+        self.trace_file: str | None = trace_file
+        self.interface: str | None = interface
+        self.channel: str | None = channel
+        self.bitrate: int | None = bitrate
 
-        self.filter = FilterEngine(filter_file)
-        self.reassembler = ISOTPReassembler(addressing, physical_ids, functional_ids)
-        self.protocols = protocols or ProtocolRegistry()
-        self.plugins = plugins or PluginRegistry()
+        self.filter: FilterEngine = FilterEngine(filter_file)
+        self.reassembler: ISOTPReassembler = ISOTPReassembler(addressing, physical_ids, functional_ids)
+        self.protocols: ProtocolRegistry = protocols or ProtocolRegistry()
+        self.plugins: PluginRegistry = plugins or PluginRegistry()
 
-        self.can_count = 0
-        self.isotp_count = 0
-        self.protocol_count = 0
+        self.can_count: int = 0
+        self.isotp_count: int = 0
+        self.protocol_count: int = 0
 
     def analyze(self):
         """Open the data source and run the full protocol pipeline until exhausted."""
@@ -790,7 +819,7 @@ class TraceAnalyzer:
             file=sys.stderr,
         )
 
-    def _open_source(self):
+    def _open_source(self) -> can.Bus | can.ASCReader | can.BLFReader:
         """Open and return a CAN message iterator (live bus or trace file reader)."""
         if self.interface:
             print(
@@ -829,7 +858,7 @@ class TraceAnalyzer:
 # CLI argument parser
 # ---------------------------------------------------------------------------
 
-def setup_parser():
+def setup_parser() -> argparse.ArgumentParser:
     """Build and return the core argument parser."""
     parser = argparse.ArgumentParser(
         description="Python-based CAN Trace Analyzer using Scapy"
@@ -888,7 +917,7 @@ def setup_parser():
     return parser
 
 
-def _add_plugin_argument(parser):
+def _add_plugin_argument(parser: argparse.ArgumentParser):
     """Add the plugin argument to a parser."""
     parser.add_argument(
         "-P", "--plugin", nargs="+", default=[],
