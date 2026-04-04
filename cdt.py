@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import can
 from scapy.all import Raw
@@ -345,6 +346,17 @@ class DefsEngine:
 # ISOTPReassembler
 # ---------------------------------------------------------------------------
 
+class _ISOTPFrame(NamedTuple):
+    """Addressing-resolved view of a CAN frame, ready for ISOTP processing."""
+    rx_id: int
+    target_addr: int
+    isotp_payload: bytes
+    session_key: object
+    timestamp: float
+    direction: str
+    frame_entry: tuple
+
+
 class ISOTPReassembler:
     """Stateful ISOTP session reassembler. Consumes CANFrames, yields ISOTPMessage on completion."""
 
@@ -378,15 +390,32 @@ class ISOTPReassembler:
             return True
         return False
 
-    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    def process(self, can_frame):  # pylint: disable=too-many-return-statements
+    def process(self, can_frame):
         """Process a CANFrame. Returns an ISOTPMessage on reassembly completion, or None."""
+        frame = self._extract_addressing(can_frame)
+        if frame is None:
+            return None
+
+        self._evict_stale(frame.timestamp)
+
+        pci = frame.isotp_payload[0] >> 4
+        if pci == 0: return self._handle_sf(frame)
+        if pci == 1: self._handle_ff(frame)
+        if pci == 2: return self._handle_cf(frame)
+        if pci == 3: self._handle_fc(frame)
+        return None
+
+    def _extract_addressing(self, can_frame):
+        """Resolve addressing fields from a CANFrame based on the configured mode.
+
+        Returns an _ISOTPFrame or None if the frame is invalid.
+        """
         payload = can_frame.data
         arb_id = can_frame.arb_id
         timestamp = can_frame.timestamp
         direction = can_frame.direction
 
-        if len(payload) == 0:
+        if not payload:
             return None
 
         if self.addressing == "extended":
@@ -396,83 +425,84 @@ class ISOTPReassembler:
             self._id_to_target[arb_id] = target_addr
             isotp_payload = payload[1:]
             session_key = (arb_id, target_addr)
-            rx_id = arb_id
         else:
             target_addr = self._id_to_target.get(arb_id, 0xFF)
             isotp_payload = payload
             session_key = arb_id
-            rx_id = arb_id
 
-        if len(isotp_payload) == 0:
+        if not isotp_payload:
             return None
 
-        if self.session_timeout > 0:
-            stale = [
-                k for k, v in self._sessions.items()
-                if timestamp - v["started"] > self.session_timeout
-            ]
-            for k in stale:
-                del self._sessions[k]
+        return _ISOTPFrame(
+            rx_id=arb_id,
+            target_addr=target_addr,
+            isotp_payload=isotp_payload,
+            session_key=session_key,
+            timestamp=timestamp,
+            direction=direction,
+            frame_entry=(timestamp, direction, arb_id, payload),
+        )
 
-        pci = isotp_payload[0] >> 4
-        can_frame_entry = (timestamp, direction, arb_id, payload)
+    def _evict_stale(self, timestamp):
+        """Remove sessions that have exceeded the inactivity timeout."""
+        if self.session_timeout <= 0:
+            return
+        stale = [k for k, v in self._sessions.items()
+                 if timestamp - v["started"] > self.session_timeout]
+        for k in stale:
+            del self._sessions[k]
+
+    def _handle_sf(self, frame: _ISOTPFrame):
+        """Handle a Single Frame (PCI=0). Returns ISOTPMessage or None."""
         max_sf_dl = 7 if self.addressing == "standard" else 6
+        dl = frame.isotp_payload[0] & 0x0F
+        if not (0 < dl <= len(frame.isotp_payload) - 1) or dl > max_sf_dl:
+            return None
+        extracted = frame.isotp_payload[1: 1 + dl]
+        padding = frame.isotp_payload[1 + dl:]
+        if padding and (len(set(padding)) > 1 or padding[0] not in (0x00, 0x55, 0xAA, 0xCC, 0xFF)):
+            return None
+        return ISOTPMessage(frame.rx_id, frame.target_addr, frame.timestamp,
+                            frame.direction, bytes(extracted), [frame.frame_entry])
 
-        if pci == 0:
-            # Single Frame
-            dl = isotp_payload[0] & 0x0F
-            if 0 < dl <= len(isotp_payload) - 1:
-                if dl > max_sf_dl:
-                    return None
-                extracted = isotp_payload[1: 1 + dl]
-                padding = isotp_payload[1 + dl:]
-                if len(padding) > 0:
-                    if len(set(padding)) > 1:
-                        return None
-                    if padding[0] not in (0x00, 0x55, 0xAA, 0xCC, 0xFF):
-                        return None
-                return ISOTPMessage(
-                    rx_id, target_addr, timestamp, direction, bytes(extracted), [can_frame_entry]
-                )
+    def _handle_ff(self, frame: _ISOTPFrame):
+        """Handle a First Frame (PCI=1). Opens a new reassembly session."""
+        max_sf_dl = 7 if self.addressing == "standard" else 6
+        if len(frame.isotp_payload) < 2:
+            return
+        dl = ((frame.isotp_payload[0] & 0x0F) << 8) | frame.isotp_payload[1]
+        if dl > max_sf_dl:
+            self._sessions[frame.session_key] = {
+                "dl": dl,
+                "data": bytearray(frame.isotp_payload[2:]),
+                "sn": 1,
+                "started": frame.timestamp,
+                "can_frames": [frame.frame_entry],
+            }
 
-        elif pci == 1:
-            # First Frame
-            if len(isotp_payload) >= 2:
-                dl = ((isotp_payload[0] & 0x0F) << 8) | isotp_payload[1]
-                if dl > max_sf_dl:
-                    self._sessions[session_key] = {
-                        "dl": dl,
-                        "data": bytearray(isotp_payload[2:]),
-                        "sn": 1,
-                        "started": timestamp,
-                        "can_frames": [can_frame_entry],
-                    }
-
-        elif pci == 2:
-            # Consecutive Frame
-            if session_key in self._sessions:
-                sn = isotp_payload[0] & 0x0F
-                if sn == self._sessions[session_key]["sn"]:
-                    self._sessions[session_key]["data"].extend(isotp_payload[1:])
-                    self._sessions[session_key]["sn"] = (sn + 1) & 0x0F
-                    self._sessions[session_key]["can_frames"].append(can_frame_entry)
-                    sess = self._sessions[session_key]
-                    if len(sess["data"]) >= sess["dl"]:
-                        full_data = bytes(sess["data"][: sess["dl"]])
-                        frames = sess["can_frames"]
-                        del self._sessions[session_key]
-                        return ISOTPMessage(
-                            rx_id, target_addr, timestamp, direction, full_data, frames
-                        )
-                else:
-                    del self._sessions[session_key]
-
-        elif pci == 3:
-            # Flow Control - transport handshake, carries no application data.
-            # Silently consumed here, same as a proper ISOTP stack would do.
-            pass
-
+    def _handle_cf(self, frame: _ISOTPFrame):
+        """Handle a Consecutive Frame (PCI=2). Returns ISOTPMessage on completion or None."""
+        if frame.session_key not in self._sessions:
+            return None
+        sess = self._sessions[frame.session_key]
+        sn = frame.isotp_payload[0] & 0x0F
+        if sn != sess["sn"]:
+            del self._sessions[frame.session_key]
+            return None
+        sess["data"].extend(frame.isotp_payload[1:])
+        sess["sn"] = (sn + 1) & 0x0F
+        sess["can_frames"].append(frame.frame_entry)
+        if len(sess["data"]) >= sess["dl"]:
+            full_data = bytes(sess["data"][: sess["dl"]])
+            frames = sess["can_frames"]
+            del self._sessions[frame.session_key]
+            return ISOTPMessage(frame.rx_id, frame.target_addr, frame.timestamp,
+                                frame.direction, full_data, frames)
         return None
+
+    @staticmethod
+    def _handle_fc(_frame: _ISOTPFrame):
+        """Handle a Flow Control frame (PCI=3). Transport handshake, no application data."""
 
     def reset(self):
         """Clears all active reassembly sessions (call before each analyze pass)."""
