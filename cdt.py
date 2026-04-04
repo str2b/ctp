@@ -236,7 +236,6 @@ class DefsEngine:
             
         return None, None
 
-    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     def parse_payload(self, payload_bytes, base_info):
         """Maps payload bytes to named parameters using JSON definitions."""
         if not self.defs or len(payload_bytes) < 1:
@@ -258,73 +257,88 @@ class DefsEngine:
             param = layout_queue.pop(0)
 
             if "mux" in param:
-                switch_on = param.get("switch_on")
-                if not switch_on:
-                    continue
-                prev_val = params_dict.get(switch_on)
-                if prev_val is None:
-                    continue
-                if isinstance(prev_val, dict):
-                    int_val = prev_val.get("value")
-                elif isinstance(prev_val, int):
-                    int_val = prev_val
-                elif isinstance(prev_val, (bytes, bytearray)):
-                    int_val = int.from_bytes(prev_val, byteorder="big")
-                else:
-                    continue
-                hex_val_str = f"0x{int_val:02X}"
-                cases = param["mux"]
-                # pylint: disable=too-many-nested-blocks
-                matched_mux = (
-                    cases.get(hex_val_str)
-                    or cases.get(str(int_val))
-                    or cases.get("default")
-                )
-                if matched_mux and isinstance(matched_mux, list):
-                    layout_queue = matched_mux + layout_queue
+                expanded = self._resolve_mux(param, params_dict)
+                if expanded:
+                    layout_queue = expanded + layout_queue
                 continue
 
-            p_name = param.get("name", "unknown")
-            p_len = param.get("length", 1)
             if offset >= len(payload_bytes):
                 break
 
-            if p_len == -1:
-                raw_val = payload_bytes[offset:]
-                offset = len(payload_bytes)
-            else:
-                raw_val = payload_bytes[offset: offset + p_len]
-                offset += p_len
-
-            if 0 < p_len <= 8:
-                int_val = int.from_bytes(raw_val, byteorder="big")
-                hex_val_str = f"0x{int_val:02X}"
-                enum_map = param.get("enum", {})
-                named_val = enum_map.get(hex_val_str) or enum_map.get(str(int_val))
-                if not named_val:
-                    for k, v in enum_map.items():
-                        if isinstance(k, str) and "-" in k:
-                            try:
-                                lo, hi = k.split("-", 1)
-                                if int(lo.strip(), 0) <= int_val <= int(hi.strip(), 0):
-                                    named_val = v
-                                    break
-                            except Exception:  # pylint: disable=broad-exception-caught
-                                pass
-                if named_val:
-                    params_dict[p_name] = {"value": int_val, "name": named_val}
-                elif p_len == 1:
-                    params_dict[p_name] = int_val
-                else:
-                    params_dict[p_name] = raw_val
-            else:
-                params_dict[p_name] = raw_val
+            name, value, offset = self._decode_param(param, payload_bytes, offset)
+            params_dict[name] = value
 
         if offset < len(payload_bytes):
             params_dict["trailing_payload"] = payload_bytes[offset:]
 
         base_info["params"] = params_dict
         return base_info
+
+    @staticmethod
+    def _resolve_mux(param, params_dict):
+        """Resolve a mux entry against already-parsed params. Returns the matched case list or None."""
+        switch_on = param.get("switch_on")
+        if not switch_on:
+            return None
+        prev_val = params_dict.get(switch_on)
+        if prev_val is None:
+            return None
+        if isinstance(prev_val, dict):
+            int_val = prev_val.get("value")
+        elif isinstance(prev_val, int):
+            int_val = prev_val
+        elif isinstance(prev_val, (bytes, bytearray)):
+            int_val = int.from_bytes(prev_val, byteorder="big")
+        else:
+            return None
+        cases = param["mux"]
+        matched = (
+            cases.get(f"0x{int_val:02X}")
+            or cases.get(str(int_val))
+            or cases.get("default")
+        )
+        return matched if isinstance(matched, list) else None
+
+    @staticmethod
+    def _decode_param(param, payload_bytes, offset):
+        """Read one parameter from payload_bytes at offset. Returns (name, value, new_offset)."""
+        p_name = param.get("name", "unknown")
+        p_len = param.get("length", 1)
+
+        if p_len == -1:
+            raw_val = payload_bytes[offset:]
+            offset = len(payload_bytes)
+        else:
+            raw_val = payload_bytes[offset: offset + p_len]
+            offset += p_len
+
+        if not (0 < p_len <= 8):
+            return p_name, raw_val, offset
+
+        int_val = int.from_bytes(raw_val, byteorder="big")
+        named_val = DefsEngine._lookup_enum(param.get("enum", {}), int_val)
+
+        if named_val:
+            return p_name, {"value": int_val, "name": named_val}, offset
+        if p_len == 1:
+            return p_name, int_val, offset
+        return p_name, raw_val, offset
+
+    @staticmethod
+    def _lookup_enum(enum_map, int_val):
+        """Return the enum label for int_val, supporting exact and range keys. Returns None if not found."""
+        named = enum_map.get(f"0x{int_val:02X}") or enum_map.get(str(int_val))
+        if named:
+            return named
+        for k, v in enum_map.items():
+            if isinstance(k, str) and "-" in k:
+                try:
+                    lo, hi = k.split("-", 1)
+                    if int(lo.strip(), 0) <= int_val <= int(hi.strip(), 0):
+                        return v
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+        return None
 
 
 # ---------------------------------------------------------------------------
