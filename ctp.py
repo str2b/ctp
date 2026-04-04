@@ -671,7 +671,7 @@ class TraceAnalyzer:
         )
 
     def _open_source(self):
-        """Open and return a CAN message iterator (live bus or ASC file reader)."""
+        """Open and return a CAN message iterator (live bus or trace file reader)."""
         if self.interface:
             print(
                 f"Opening LIVE interface '{self.interface}'"
@@ -682,13 +682,27 @@ class TraceAnalyzer:
             if self.bitrate:
                 kwargs["bitrate"] = self.bitrate
             return can.Bus(**kwargs)
+
         if not self.trace_file:
             raise ValueError("Specify a trace_file or a live --interface (with --channel).")
+
+        # Auto-detect trace format by extension
+        ext = Path(self.trace_file).suffix.lower()
+        reader_map = {
+            ".asc": can.ASCReader,
+            ".blf": can.BLFReader,
+        }
+
+        if ext not in reader_map:
+            raise ValueError(
+                f"Unsupported trace format: {ext}. Supported: {', '.join(reader_map.keys())}"
+            )
+
         print(
-            f"Reading {self.trace_file} in real-time streaming mode...",
+            f"Reading {self.trace_file} (format: {ext[1:].upper()}) in real-time streaming mode...",
             file=sys.stderr,
         )
-        return can.ASCReader(self.trace_file)
+        return reader_map[ext](self.trace_file)
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +718,7 @@ def setup_parser():
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument(
         "-f", "--trace-file",
-        help="Path to the .asc trace file to analyze.",
+        help="Path to the .asc or .blf trace file to analyze.",
     )
     source_group.add_argument(
         "-i", "--interface",

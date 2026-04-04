@@ -1,6 +1,6 @@
 # CAN Trace Parser
 
-A Python tool for parsing CAN traces (`.asc`), their ISOTP payloads and KWP2000 messages.
+A Python tool for parsing CAN traces (`.asc`, `.blf`), their ISOTP payloads and KWP2000 messages.
 
 The analyzer extracts protocols and delegates logic to plugins via a hook architecture.
 
@@ -9,7 +9,7 @@ The analyzer extracts protocols and delegates logic to plugins via a hook archit
 This started as a vibe coding hobby project and is provided as-is.
 
 ## Features
-- **CAN Parsing:** Reads `.asc` trace files using `python-can`.
+- **Multi-Format Traces:** Reads `.asc` and `.blf` trace files.
 - **ISOTP Reassembly:** Assembles ISOTP streams (supports standard and extended addressing).
 - **KWP2000 Extraction:** Parses KWP2000 services using Scapy or custom definitions.
 - **UDS Support:** Not implemented yet, but planned.
@@ -20,7 +20,7 @@ This started as a vibe coding hobby project and is provided as-is.
 ## Arguments
 
 **Source (mutually exclusive, required):**
-- `-f`, `--trace-file <path>`: Path to `.asc` trace file
+- `-f`, `--trace-file <path>`: Path to trace file (`.asc`, `.blf`, etc.)
 - `-i`, `--interface <name>`: Live python-can interface (e.g., `pcan`, `socketcan`, `vector`)
 
 **Live Interface Options** (only with `--interface`):
