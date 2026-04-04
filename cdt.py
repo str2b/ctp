@@ -1,4 +1,4 @@
-"""CAN Trace Analyzer — a modular streaming pipeline for CAN/ISOTP/KWP analysis."""
+"""CDT - CAN Diagnostic Tap. A modular streaming pipeline for CAN/ISOTP diagnostic analysis."""
 
 import abc
 import argparse
@@ -15,7 +15,7 @@ from scapy.contrib.automotive.kwp import KWP
 
 
 # ---------------------------------------------------------------------------
-# Data classes — one per protocol layer
+# Data classes - one per protocol layer
 # ---------------------------------------------------------------------------
 
 class Filterable(abc.ABC):
@@ -454,7 +454,7 @@ class ISOTPReassembler:
                     del self._sessions[session_key]
 
         elif pci == 3:
-            # Flow Control — transport handshake, carries no application data.
+            # Flow Control - transport handshake, carries no application data.
             # Silently consumed here, same as a proper ISOTP stack would do.
             pass
 
@@ -467,10 +467,10 @@ class ISOTPReassembler:
 
 
 # ---------------------------------------------------------------------------
-# Protocol Layer — registry pattern, multiple decoders active simultaneously
+# Protocol Layer - registry pattern, multiple decoders active simultaneously
 #
 #   ProtocolDecoder (ABC)
-#   └── KWPDecoder   (KWP2000 / ISO 14230)
+#    KWPDecoder   (KWP2000 / ISO 14230)
 #
 #   ProtocolRegistry   tries each decoder in order, dispatches first match
 # ---------------------------------------------------------------------------
@@ -506,7 +506,7 @@ class KWPDecoder(ProtocolDecoder):
     """Decodes KWP messages from ISOTPMessage payloads.
 
     Tries DefsEngine first for fast custom-JSON decoding; falls back to Scapy
-    transparently. Always returns a KWPMessage — the caller never sees raw dicts
+    transparently. Always returns a KWPMessage - the caller never sees raw dicts
     or Scapy internals.
     """
 
@@ -600,14 +600,14 @@ class KWPDecoder(ProtocolDecoder):
 
 
 # ---------------------------------------------------------------------------
-# Plugin Registry — fan-out pattern, all plugins receive every event
+# Plugin Registry - fan-out pattern, all plugins receive every event
 #
 #   PluginRegistry
-#   ├── load(path)            dynamically imports a plugin module
-#   ├── add_arguments(parser) lets plugins register their own CLI args
-#   ├── init(args)            initializes all plugins after arg parsing
-#   ├── dispatch(msg)         calls on_{layer}_message(msg) on each plugin
-#   └── teardown()            graceful shutdown for all plugins
+#    load(path)            dynamically imports a plugin module
+#    add_arguments(parser) lets plugins register their own CLI args
+#    init(args)            initializes all plugins after arg parsing
+#    dispatch(msg)         calls on_{layer}_message(msg) on each plugin
+#    teardown()            graceful shutdown for all plugins
 # ---------------------------------------------------------------------------
 
 class PluginRegistry:
@@ -619,7 +619,7 @@ class PluginRegistry:
     def load(self, path: str) -> "PluginRegistry":
         """Dynamically load a plugin from a file path. Returns self for chaining."""
         abs_path = os.path.abspath(path)
-        name = f"ctp_plugin_{len(self._plugins)}"
+        name = f"cdt_plugin_{len(self._plugins)}"
         spec = importlib.util.spec_from_file_location(name, abs_path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -655,11 +655,11 @@ class PluginRegistry:
 
 
 # ---------------------------------------------------------------------------
-# TraceAnalyzer — pure pipeline orchestrator
+# TraceAnalyzer - pure pipeline orchestrator
 # ---------------------------------------------------------------------------
 
 class TraceAnalyzer:
-    """Orchestrates the CAN → ISOTP → Protocol pipeline over a file or live bus."""
+    """Orchestrates the CAN -> ISOTP -> Protocol pipeline over a file or live bus."""
 
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
@@ -700,7 +700,7 @@ class TraceAnalyzer:
                 if raw_msg.is_error_frame or raw_msg.is_remote_frame:
                     continue
 
-                # ── CAN layer ────────────────────────────────────────────────────
+                #  CAN layer 
                 self.can_count += 1
                 direction = "Rx" if raw_msg.is_rx else "Tx"
                 can_frame = CANFrame(
@@ -712,7 +712,7 @@ class TraceAnalyzer:
 
                 self.plugins.dispatch(can_frame)
 
-                # ── ISOTP layer ──────────────────────────────────────────────────
+                #  ISOTP layer 
                 if not self.reassembler.is_isotp_id(can_frame.arb_id):
                     continue
 
@@ -726,7 +726,7 @@ class TraceAnalyzer:
 
                 self.plugins.dispatch(isotp_msg)
 
-                # ── Protocol layer ───────────────────────────────────────────────
+                #  Protocol layer 
                 proto_msg = self.protocols.process(isotp_msg)
                 if not proto_msg:
                     continue
@@ -793,7 +793,8 @@ def setup_parser():
 
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument(
-        "-f", "--trace-file",
+        "-t", "--trace",
+        dest="trace_file",
         help="Path to the .asc or .blf trace file to analyze.",
     )
     source_group.add_argument(
@@ -814,7 +815,7 @@ def setup_parser():
     )
 
     parser.add_argument(
-        "-A", "--addressing", choices=["standard", "extended"], default="extended",
+        "-a", "--addressing", choices=["standard", "extended"], default="extended",
         help="Type of ISOTP addressing layer (default: extended).",
     )
     parser.add_argument(
@@ -822,24 +823,29 @@ def setup_parser():
         help="Optional JSON file defining custom service layouts to override Scapy.",
     )
     parser.add_argument(
-        "--filter",
+        "-f", "--filter",
         help="Optional JSON filter engine configuration to dynamically route and drop payloads.",
     )
     parser.add_argument(
-        "--physical-ids", nargs="+",
+        "-pids", "--physical-ids", nargs="+",
         help="Optional list of physical CAN Arbitration IDs (hex or decimal).",
     )
     parser.add_argument(
-        "--functional-ids", nargs="+",
+        "-fids", "--functional-ids", nargs="+",
         help="Optional list of functional CAN Arbitration IDs (hex or decimal)."
              "to natively parse as ISO-TP.",
     )
+    _add_plugin_argument(parser)
+    return parser
+
+
+def _add_plugin_argument(parser):
+    """Add the plugin argument to a parser."""
     parser.add_argument(
-        "--plugin", nargs="+", default=[],
+        "-p", "--plugin", nargs="+", default=[],
         metavar="FILE",
         help="One or more Python plugin files (e.g. plugins/trace_printer.py).",
     )
-    return parser
 
 
 # ---------------------------------------------------------------------------
@@ -851,7 +857,7 @@ def main():
     # Pre-parse to discover plugins before the main parser enforces required args.
     # Plugins may call add_arguments() to register their own flags.
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--plugin", nargs="+", default=[])
+    _add_plugin_argument(pre_parser)
     pre_args, _ = pre_parser.parse_known_args()
 
     plugins = PluginRegistry()

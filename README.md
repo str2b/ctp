@@ -1,8 +1,8 @@
-# CAN Trace Parser
+# CDT - CAN Diagnostic Tap
 
-A Python tool for parsing CAN traces (`.asc`, `.blf`), their ISOTP payloads and KWP2000 messages.
+A Python tool for analyzing CAN traces (`.asc`, `.blf`), their ISOTP payloads and diagnostic protocols (KWP2000, UDS-ready).
 
-The analyzer extracts protocols and fans out events to plugins via a plugin registry.
+The tap extracts protocol messages and fans out events to plugins via a plugin registry.
 
 **Disclaimer:** This tool is for **educational and personal use only**. Use responsibly and only with authorization on systems you own or have explicit permission to analyze. 
 
@@ -19,7 +19,7 @@ This started as a vibe coding hobby project and is provided as-is.
 ## Arguments
 
 **Source (mutually exclusive, required):**
-- `-f`, `--trace-file <path>`: Path to trace file (`.asc`, `.blf`, etc.)
+- `-t`, `--trace <path>`: Path to trace file (`.asc`, `.blf`, etc.)
 - `-i`, `--interface <name>`: Live python-can interface (e.g., `pcan`, `socketcan`, `vector`)
 
 **Live Interface Options** (only with `--interface`):
@@ -27,29 +27,56 @@ This started as a vibe coding hobby project and is provided as-is.
 - `-b`, `--bitrate <rate>`: Bitrate for the interface (e.g., `500000`)
 
 **Diagnostic & Decoding:**
-- `-A`, `--addressing {standard,extended}`: ISOTP addressing mode (default: `standard`)
+- `-a`, `--addressing {standard,extended}`: ISOTP addressing mode (default: `extended`)
 - `-d`, `--defs <file.json>`: Custom KWP service definitions
-- `--filter <file.json>`: Payload filtering rules
+- `-f`, `--filter <file.json>`: Payload filtering rules
 - `--physical-ids <id1 id2 ...>`: Arbitration IDs for physical ISOTP
 - `--functional-ids <id1 id2 ...>`: Arbitration IDs for functional ISOTP
 
 **Extensibility:**
-- `--plugin <file.py> [file.py ...]`: One or more Python plugin files
+- `-p`, `--plugin <file.py> [file.py ...]`: One or more Python plugin files
 
 ---
 
 ## Architecture
 
-The analyzer uses a layered pipeline:
+The analyzer uses a registry-based, layered pipeline designed for protocol extensibility:
 
-1. **`FilterEngine`**: JSON-based rule matching at each layer.
-2. **`DefsEngine`**: JSON-based KWP service and parameter decoding.
-3. **`ISOTPReassembler`**: Stateful reassembly of multi-frame CAN messages.
-4. **`ProtocolRegistry`**: Tries each registered `ProtocolDecoder` in order; currently hosts `KWPDecoder` (Scapy + custom defs). Add a `UDSDecoder` here for UDS support.
-5. **`PluginRegistry`**: Fans out decoded messages to all loaded plugins via `on_{layer}_message()`.
-6. **`TraceAnalyzer`**: Orchestrates the pipeline from source to plugins.
+```
+Source (trace / live)
+    |
+CANFrame
+    |
+ISOTPReassembler
+    |
+ISOTPMessage
+    |
+ProtocolRegistry (first-match dispatch)
+    |
+    +-- KWPDecoder --------> KWPMessage
+    +-- UDSDecoder (future) -> UDSMessage
+    |
+PluginRegistry (fan-out to all plugins)
+    |
+    +-- plugin A --------> on_kwp_message()
+    +-- plugin B --------> on_isotp_message(), on_kwp_message()
+    +-- plugin C (future) -> on_uds_message()
+```
 
-Data flows through the pipeline as typed objects: `CANFrame` → `ISOTPMessage` → `KWPMessage` (or future `UDSMessage`).
+### Core Components
+
+1. **FilterEngine**: JSON-based rule matching at each layer (CAN, ISOTP, protocol).
+2. **DefsEngine**: JSON-based parameter and enum decoding for protocols.
+3. **ISOTPReassembler**: Stateful reassembly of multi-frame CAN messages (ISO 15765-2, standard + extended addressing).
+4. **ProtocolRegistry**: Multi-protocol decoder registry pattern:
+   - Tries each registered ProtocolDecoder in order
+   - KWPDecoder: KWP2000 / ISO 14230 (active). Uses DefsEngine first, falls back to Scapy.
+   - UDSDecoder: WIP / not available yet
+5. **PluginRegistry**: Fans out all decoded messages to every loaded plugin:
+   - Each plugin implements optional callbacks: on_can_message(), on_isotp_message(), on_kwp_message(), etc.
+   - Framework automatically dispatches to the correct handler for each layer.
+   - Plugins are dynamically loaded and run independently.
+6. **TraceAnalyzer**: Orchestrates the full pipeline from source to plugins.
 
 ---
 
@@ -154,23 +181,23 @@ Example `filter.json`:
 ### Plugin API
 Each plugin is a plain Python file. All functions are optional:
 
-- `add_arguments(parser)`: Register CLI arguments with argparse.
-- `init(args)`: Initialize state after argument parsing.
-- `on_can_message(can_frame)`: Callback for `CANFrame` objects.
-- `on_isotp_message(isotp_msg)`: Callback for `ISOTPMessage` objects.
-- `on_kwp_message(kwp_msg)`: Callback for `KWPMessage` objects.
-- `teardown()`: Callback invoked before termination.
+- add_arguments(parser): Register CLI arguments with argparse.
+- init(args): Initialize state after argument parsing.
+- on_can_message(can_frame): Callback for CANFrame objects.
+- on_isotp_message(isotp_msg): Callback for ISOTPMessage objects.
+- on_kwp_message(kwp_msg): Callback for KWPMessage objects.
+- teardown(): Callback invoked before termination.
 
-Multiple plugins can be loaded simultaneously with `--plugin`. Each receives every event independently.
+Multiple plugins can be loaded simultaneously with --plugin. Each receives every event independently.
 
 ---
 
-## Plugin: `trace_printer.py`
+## Plugin: trace_printer.py
 A plugin for generic KWP traces.
 
 ### Arguments
-- `-p`, `--print`: Layers to output (`raw`, `isotp`, `kwp`).
-- `-o`, `--output`: Redirect output to a file.
+- --print: Layers to output (can, isotp, kwp).
+- -o, --output: Redirect output to a file.
 
 
 ## Examples
@@ -196,7 +223,7 @@ A synthetic CAN trace file used to verify the analyzer logic. It contains no rea
 
 Run the verification:
 ```bash
-python ctp.py --trace-file examples/smoke_test.asc --filter examples/filter_demo.json --defs examples/kwp_defs_demo.json --plugin plugins/trace_printer.py -p can isotp kwp
+python cdt.py -t examples/smoke_test.asc -f examples/filter_demo.json -d examples/kwp_defs_demo.json -p plugins/trace_printer.py --print can isotp kwp
 ```
 
 See [examples/](examples/) for configuration templates and a test trace.

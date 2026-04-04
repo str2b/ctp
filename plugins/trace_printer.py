@@ -1,7 +1,15 @@
 """
-KWP2000 Logger Hook Plugin
-Implements specific enum resolution and pretty-printing logic for Generic traces.
-Now cleanly implements its own argument parsing and custom payload definitions!
+trace_printer - CDT Plugin
+Pretty-prints CAN, ISOTP, and KWP messages to stdout (or a redirected file).
+Implements enum resolution for Generic-specific identifiers and memory types.
+
+Plugin API implemented:
+  add_arguments(parser)         register --print and --output flags
+  init(args)                    apply layer selection and optional output redirect
+  on_can_message(can_frame)     format and print raw CAN frames
+  on_isotp_message(isotp_msg)   format and print reassembled ISOTP payloads
+  on_kwp_message(kwp_msg)       format and print decoded KWP2000 services
+  teardown()                    restore stdout and close output file if redirected
 """
 
 import sys
@@ -27,15 +35,14 @@ _state = {
 def add_arguments(parser):
     """Called by the core analyzer to let the plugin register its own arguments."""
     parser.add_argument(
-        "-p",
         "--print",
         nargs="+",
         choices=["can", "isotp", "kwp"],
         default=["kwp"],
-        help="[Plugin] Which layers to print output for (default: kwp)",
+        help="[trace_printer] Which layers to print output for (default: kwp)",
     )
     parser.add_argument(
-        "-o", "--output", help="[Plugin] Optional file to redirect stdout to natively."
+        "-o", "--output", help="[trace_printer] Optional file to redirect stdout to natively."
     )
 
 
