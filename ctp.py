@@ -700,29 +700,36 @@ def setup_parser():
     parser = argparse.ArgumentParser(
         description="Python-based CAN Trace Analyzer using Scapy"
     )
-    parser.add_argument(
-        "trace_file", nargs="?",
-        help="Path to the .asc trace file to analyze (if not using live interface).",
+
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "-f", "--trace-file",
+        help="Path to the .asc trace file to analyze.",
     )
-    parser.add_argument(
+    source_group.add_argument(
         "-i", "--interface",
         help="Live python-can interface (e.g., 'pcan', 'socketcan', 'vector').",
     )
-    parser.add_argument(
+
+    live_group = parser.add_argument_group(
+        "live options", "Arguments only applicable when using --interface."
+    )
+    live_group.add_argument(
         "-c", "--channel",
-        help="Live python-can channel (e.g., 'vcan0', 'PCAN_USBBUS1'). Required if --interface is used.",
+        help="python-can channel (e.g., 'vcan0', 'PCAN_USBBUS1').",
     )
-    parser.add_argument(
+    live_group.add_argument(
         "-b", "--bitrate", type=int,
-        help="Bitrate for live interfaces (e.g., 500000).",
+        help="Bitrate for the live interface (e.g., 500000).",
     )
+
     parser.add_argument(
-        "-A", "--addressing", choices=["standard", "extended"], default="standard",
-        help="Type of ISOTP addressing layer (default: standard)",
+        "-A", "--addressing", choices=["standard", "extended"], default="extended",
+        help="Type of ISOTP addressing layer (default: extended).",
     )
     parser.add_argument(
         "-d", "--defs",
-        help="Optional JSON file defining custom service layouts to override Scapy",
+        help="Optional JSON file defining custom service layouts to override Scapy.",
     )
     parser.add_argument(
         "--filter",
@@ -730,16 +737,16 @@ def setup_parser():
     )
     parser.add_argument(
         "--physical-ids", nargs="+",
-        help="Optional list of physical CAN Arbitration IDs (hex or decimal) to natively parse as ISO-TP.",
+        help="Optional list of physical CAN Arbitration IDs (hex or decimal).",
     )
     parser.add_argument(
         "--functional-ids", nargs="+",
-        help="Optional list of functional CAN Arbitration IDs (hex or decimal) "
+        help="Optional list of functional CAN Arbitration IDs (hex or decimal)."
              "to natively parse as ISO-TP.",
     )
     parser.add_argument(
         "--hook",
-        help="Optional Python file defining protocol hooks (e.g. on_kwp_message)",
+        help="Optional Python file defining protocol hooks (e.g. on_kwp_message).",
     )
     return parser
 
@@ -750,8 +757,12 @@ def setup_parser():
 
 def main():
     """Load plugin, parse arguments, construct analyzer, and run the pipeline."""
+    # Pre-parse only for --hook before the main parser enforces required args.
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--hook")
+    pre_args, _ = pre_parser.parse_known_args()
+
     arg_parser = setup_parser()
-    known_args, _ = arg_parser.parse_known_args()
 
     can_hook = None
     isotp_hook = None
@@ -759,8 +770,8 @@ def main():
     plugin_init = None
     plugin_teardown = None
 
-    if known_args.hook:
-        hook_path = os.path.abspath(known_args.hook)
+    if pre_args.hook:
+        hook_path = os.path.abspath(pre_args.hook)
         try:
             name = "plugin_hook"
             spec = importlib.util.spec_from_file_location(name, hook_path)
@@ -776,21 +787,23 @@ def main():
             plugin_init = getattr(hook_mod, "init", None)
             plugin_teardown = getattr(hook_mod, "teardown", None)
 
-            print(f"Loaded plugin hooks from {known_args.hook}", file=sys.stderr)
+            print(f"Loaded plugin hooks from {pre_args.hook}", file=sys.stderr)
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(
-                f"Failed to load hook plugin {known_args.hook}: {e}",
+                f"Failed to load hook plugin {pre_args.hook}: {e}",
                 file=sys.stderr
             )
 
     args = arg_parser.parse_args()
 
-    if args.interface and not args.channel:
-        arg_parser.error("--channel is required when --interface is specified.")
-    if not args.interface and not args.trace_file:
-        arg_parser.error(
-            "You must specify either a trace_file or a live --interface (with --channel)."
-        )
+    if args.interface:
+        if not args.channel:
+            arg_parser.error("--channel is required when using --interface.")
+    else:
+        if args.channel:
+            arg_parser.error("--channel can only be used with --interface.")
+        if args.bitrate:
+            arg_parser.error("--bitrate can only be used with --interface.")
 
     if plugin_init:
         plugin_init(args)
