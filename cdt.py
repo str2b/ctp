@@ -9,12 +9,24 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import NamedTuple, Any, TypeAlias, TypedDict
 
 import can
 from scapy.all import Raw
 from scapy.contrib.automotive.kwp import KWP
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+class AddressingMode(Enum):
+    """ISOTP addressing modes."""
+    STANDARD = "standard"
+    EXTENDED = "extended"
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +59,11 @@ class ISOTPSession(TypedDict):
 # Data classes - one per protocol layer
 # ---------------------------------------------------------------------------
 
-class Filterable(abc.ABC):
-    """Interface for protocol layer objects that can be processed by FilterEngine."""
+class Message(abc.ABC):
+    """Base class for protocol messages flowing through the pipeline.
+
+    Provides layer identification and filter attributes for rule evaluation.
+    """
 
     @property
     @abc.abstractmethod
@@ -62,7 +77,7 @@ class Filterable(abc.ABC):
         return {}
 
 
-class CANFrame(Filterable):
+class CANFrame(Message):
     """Wraps a raw can.Message with a resolved direction field."""
 
     def __init__(self, arb_id: int, data: bytes, timestamp: float, direction: str):
@@ -79,7 +94,7 @@ class CANFrame(Filterable):
         return {"id": self.arb_id, "payload": self.data}
 
 
-class ISOTPMessage(Filterable):
+class ISOTPMessage(Message):
     """Carries a fully reassembled ISOTP data payload and its metadata."""
 
     def __init__(self, rx_id: int, tgt_addr: int, time: float, direction: str,
@@ -99,7 +114,7 @@ class ISOTPMessage(Filterable):
         return {"payload": self.data}
 
 
-class KWPMessage(Filterable):
+class KWPMessage(Message):
     """Carries a decoded KWP service message and its metadata."""
 
     def __init__(self, isotp_msg: ISOTPMessage, service_hex: int, service_name: str,
@@ -154,14 +169,14 @@ class FilterEngine:
             self.mode = filter_def.get("mode", "whitelist").lower()
             self.rules = filter_def.get("rules", [])
             print(
-                f"Loaded {len(self.rules)} core filter rules in {self.mode} mode.",
+                f"Loaded {len(self.rules)} filter rules in {self.mode} mode.",
                 file=sys.stderr,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
             sys.exit(1)
 
-    def should_drop(self, message: Filterable) -> bool:
+    def should_drop(self, message: Message) -> bool:
         """Returns True if the message should be discarded according to the filter rules."""
         if not self.rules:
             return False
@@ -398,15 +413,24 @@ class _ISOTPFrame(NamedTuple):
 class ISOTPReassembler:
     """Stateful ISOTP session reassembler. Consumes CANFrames, yields ISOTPMessage on completion."""
 
-    def __init__(self, addressing: str = "standard", physical_ids: list[str] | None = None,
-                 functional_ids: list[str] | None = None, session_timeout: float = 2.0):
-        self.addressing: str = addressing.lower()
-        self.session_timeout: float = session_timeout
+    @dataclass
+    class Config:
+        addressing: AddressingMode = AddressingMode.STANDARD
+        physical_ids: list[str] | None = None
+        functional_ids: list[str] | None = None
+        session_timeout: float = 2.0
+
+    def __init__(self, config: ISOTPReassembler.Config | None = None):
+        if config is None:
+            config = self.Config()
+
+        self.addressing: AddressingMode = config.addressing
+        self.session_timeout: float = config.session_timeout
         self._sessions: dict[SessionKey, ISOTPSession] = {}
         self._id_to_target: dict[int, int] = {}
-        self._use_custom_ids = physical_ids is not None or functional_ids is not None
+        self._use_custom_ids = config.physical_ids is not None or config.functional_ids is not None
         self._diagnostic_ids = set()
-        for ids_list in (physical_ids, functional_ids):
+        for ids_list in (config.physical_ids, config.functional_ids):
             if not ids_list:
                 continue
             for rxid in ids_list:
@@ -460,7 +484,7 @@ class ISOTPReassembler:
         if not payload:
             return None
 
-        if self.addressing == "extended":
+        if self.addressing == AddressingMode.EXTENDED:
             if len(payload) < 2:
                 return None
             target_addr = payload[0]
@@ -496,7 +520,7 @@ class ISOTPReassembler:
 
     def _handle_sf(self, frame: _ISOTPFrame) -> ISOTPMessage | None:
         """Handle a Single Frame (PCI=0). Returns ISOTPMessage or None."""
-        max_sf_dl = 7 if self.addressing == "standard" else 6
+        max_sf_dl = 7 if self.addressing == AddressingMode.STANDARD else 6
         dl = frame.isotp_payload[0] & 0x0F
         if not (0 < dl <= len(frame.isotp_payload) - 1) or dl > max_sf_dl:
             return None
@@ -509,7 +533,7 @@ class ISOTPReassembler:
 
     def _handle_ff(self, frame: _ISOTPFrame):
         """Handle a First Frame (PCI=1). Opens a new reassembly session."""
-        max_sf_dl = 7 if self.addressing == "standard" else 6
+        max_sf_dl = 7 if self.addressing == AddressingMode.STANDARD else 6
         if len(frame.isotp_payload) < 2:
             return
         dl = ((frame.isotp_payload[0] & 0x0F) << 8) | frame.isotp_payload[1]
@@ -565,7 +589,7 @@ class ProtocolDecoder(abc.ABC):
     """Decodes ISOTPMessages into typed application-layer protocol messages."""
 
     @abc.abstractmethod
-    def process(self, isotp_msg: ISOTPMessage) -> "Filterable | None":
+    def process(self, isotp_msg: ISOTPMessage) -> "Message | None":
         """Return a decoded protocol message, or None if not applicable."""
 
 
@@ -580,7 +604,7 @@ class ProtocolRegistry:
         self._decoders.append(decoder)
         return self
 
-    def process(self, isotp_msg: ISOTPMessage) -> "Filterable | None":
+    def process(self, isotp_msg: ISOTPMessage) -> "Message | None":
         for decoder in self._decoders:
             result = decoder.process(isotp_msg)
             if result is not None:
@@ -731,7 +755,7 @@ class PluginRegistry:
             if hasattr(plugin, "teardown"):
                 plugin.teardown()
 
-    def dispatch(self, msg: Filterable):
+    def dispatch(self, msg: Message):
         """Call on_{layer}_message(msg) on every plugin that implements it."""
         handler = f"on_{msg.layer}_message"
         for plugin in self._plugins:
@@ -747,28 +771,31 @@ class PluginRegistry:
 class TraceAnalyzer:
     """Orchestrates the CAN -> ISOTP -> Protocol pipeline over a file or live bus."""
 
-    def __init__(
-        self,
-        trace_file: str | None = None,
-        interface: str | None = None,
-        channel: str | None = None,
-        bitrate: int | None = None,
-        addressing: str = "standard",
-        filter_file: str | None = None,
-        physical_ids: list[str] | None = None,
-        functional_ids: list[str] | None = None,
-        protocols: ProtocolRegistry | None = None,
-        plugins: PluginRegistry | None = None,
-    ) -> None:
-        self.trace_file: str | None = trace_file
-        self.interface: str | None = interface
-        self.channel: str | None = channel
-        self.bitrate: int | None = bitrate
+    @dataclass
+    class Config:
+        trace_file: str | None = None
+        interface: str | None = None
+        channel: str | None = None
+        bitrate: int | None = None
+        addressing: AddressingMode = AddressingMode.STANDARD
+        filter_file: str | None = None
+        physical_ids: list[str] | None = None
+        functional_ids: list[str] | None = None
+        protocols: ProtocolRegistry | None = None
+        plugins: PluginRegistry | None = None
 
-        self.filter: FilterEngine = FilterEngine(filter_file)
-        self.reassembler: ISOTPReassembler = ISOTPReassembler(addressing, physical_ids, functional_ids)
-        self.protocols: ProtocolRegistry = protocols or ProtocolRegistry()
-        self.plugins: PluginRegistry = plugins or PluginRegistry()
+    def __init__(self, config: TraceAnalyzer.Config):
+        self.config: TraceAnalyzer.Config = config
+        self.filter: FilterEngine = FilterEngine(config.filter_file)
+        self.reassembler: ISOTPReassembler = ISOTPReassembler(
+            ISOTPReassembler.Config(
+                addressing=config.addressing,
+                physical_ids=config.physical_ids,
+                functional_ids=config.functional_ids,
+            )
+        )
+        self.protocols: ProtocolRegistry = config.protocols or ProtocolRegistry()
+        self.plugins: PluginRegistry = config.plugins or PluginRegistry()
 
         self.can_count: int = 0
         self.isotp_count: int = 0
@@ -833,22 +860,22 @@ class TraceAnalyzer:
 
     def _open_source(self) -> can.Bus | can.ASCReader | can.BLFReader:
         """Open and return a CAN message iterator (live bus or trace file reader)."""
-        if self.interface:
+        if self.config.interface:
             print(
-                f"Opening LIVE interface '{self.interface}'"
-                f" on channel '{self.channel}'...",
+                f"Opening LIVE interface '{self.config.interface}'"
+                f" on channel '{self.config.channel}'...",
                 file=sys.stderr,
             )
-            kwargs = {"interface": self.interface, "channel": self.channel}
-            if self.bitrate:
-                kwargs["bitrate"] = self.bitrate
+            kwargs = {"interface": self.config.interface, "channel": self.config.channel}
+            if self.config.bitrate:
+                kwargs["bitrate"] = self.config.bitrate
             return can.Bus(**kwargs)
 
-        if not self.trace_file:
+        if not self.config.trace_file:
             raise ValueError("Specify a trace_file or a live --interface (with --channel).")
 
         # Auto-detect trace format by extension
-        ext = Path(self.trace_file).suffix.lower()
+        ext = Path(self.config.trace_file).suffix.lower()
         reader_map = {
             ".asc": can.ASCReader,
             ".blf": can.BLFReader,
@@ -860,10 +887,10 @@ class TraceAnalyzer:
             )
 
         print(
-            f"Reading {self.trace_file} (format: {ext[1:].upper()}) in real-time streaming mode...",
+            f"Reading {self.config.trace_file} (format: {ext[1:].upper()}) in real-time streaming mode...",
             file=sys.stderr,
         )
-        return reader_map[ext](self.trace_file)
+        return reader_map[ext](self.config.trace_file)
 
 
 # ---------------------------------------------------------------------------
@@ -900,7 +927,10 @@ def setup_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "-a", "--addressing", choices=["standard", "extended"], default="extended",
+        "-a", "--addressing",
+        type=AddressingMode,
+        choices=list(AddressingMode),
+        default=AddressingMode.EXTENDED,
         help="Type of ISOTP addressing layer (default: extended).",
     )
     parser.add_argument(
@@ -979,18 +1009,19 @@ def main():
     plugins.init(args)
 
     try:
-        TraceAnalyzer(
+        config = TraceAnalyzer.Config(
             trace_file=args.trace_file,
             interface=args.interface,
             channel=args.channel,
             bitrate=args.bitrate,
             addressing=args.addressing,
             filter_file=args.filter,
-            physical_ids=getattr(args, "physical_ids", None),
-            functional_ids=getattr(args, "functional_ids", None),
+            physical_ids=args.physical_ids,
+            functional_ids=args.functional_ids,
             protocols=protocols,
             plugins=plugins,
-        ).analyze()
+        )
+        TraceAnalyzer(config).analyze()
     finally:
         plugins.teardown()
 
