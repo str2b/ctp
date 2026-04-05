@@ -813,7 +813,6 @@ class TraceAnalyzer:
                     continue
 
                 #  CAN layer
-                self.can_count += 1
                 direction = "Rx" if raw_msg.is_rx else "Tx"
                 can_frame = CANFrame(
                     raw_msg.arbitration_id, raw_msg.data, raw_msg.timestamp, direction
@@ -822,6 +821,7 @@ class TraceAnalyzer:
                 if self.filter.should_drop(can_frame):
                     continue
 
+                self.can_count += 1
                 self.plugins.dispatch(can_frame)
 
                 #  ISOTP layer
@@ -832,10 +832,10 @@ class TraceAnalyzer:
                 if not isotp_msg:
                     continue
 
-                self.isotp_count += 1
                 if self.filter.should_drop(isotp_msg):
                     continue
 
+                self.isotp_count += 1
                 self.plugins.dispatch(isotp_msg)
 
                 #  Protocol layer
@@ -854,7 +854,7 @@ class TraceAnalyzer:
 
         print(
             f"Processed {self.can_count} CAN frames,"
-            f" yielding {self.isotp_count} ISOTPs and {self.protocol_count} protocol messages.",
+            f" yielding {self.isotp_count} ISOTPs and {self.protocol_count} protocol messages (after filtering).",
             file=sys.stderr,
         )
 
