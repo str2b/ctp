@@ -140,7 +140,8 @@ def on_kwp_message(kwp_msg):
 
     data = kwp_msg.data
     params_str = format_params(kwp_msg.params)
-    service_label = f"0x{kwp_msg.service_hex:02X} ({kwp_msg.service_name[:35]:<35})"
+    service_id = getattr(kwp_msg, "service_id", getattr(kwp_msg, "service_hex", 0))
+    service_label = f"0x{service_id:02X} ({kwp_msg.service_name[:35]:<35})"
     trailer = f" | {params_str}" if params_str else ""
 
     print(

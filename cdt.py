@@ -39,7 +39,7 @@ SessionKey: TypeAlias = int | tuple[int, int]  # standard (int) or extended (arb
 
 class ServiceInfo(TypedDict, total=False):
     """Service definition lookup result."""
-    service_hex: int
+    service_id: int
     service_name: str
     src: int
     tgt: int
@@ -117,14 +117,14 @@ class ISOTPMessage(Message):
 class KWPMessage(Message):
     """Carries a decoded KWP service message and its metadata."""
 
-    def __init__(self, isotp_msg: ISOTPMessage, service_hex: int, service_name: str,
+    def __init__(self, isotp_msg: ISOTPMessage, service_id: int, service_name: str,
                  params: dict[str, Any], scapy_pkt: Any = None):
         self.isotp_msg: ISOTPMessage = isotp_msg
         self.src: int = isotp_msg.rx_id & 0xFF
         self.tgt: int = isotp_msg.tgt_addr
         self.time: float = isotp_msg.time
         self.direction: str = isotp_msg.direction
-        self.service_hex: int = service_hex
+        self.service_id: int = service_id
         self.service_name: str = service_name
         self.params: dict[str, Any] = params
         self.data: bytes = isotp_msg.data
@@ -146,7 +146,7 @@ class KWPMessage(Message):
         return {
             "src": self.src,
             "tgt": self.tgt,
-            "service": f"0x{self.service_hex:0X}",
+            "service": f"0x{self.service_id:0X}",
             "payload": self.data,
         }
 
@@ -244,7 +244,7 @@ class DefsEngine:
             return int(value, 16)
         return int(value)
 
-    def lookup(self, service_id: int, base_info: dict[str, Any] | None = None
+    def lookup(self, service_id: int, message_context: dict[str, Any] | None = None
               ) -> tuple[dict[str, Any] | None, str | None]:
         """Returns (service_def, service_name) for a service ID, or (None, None).
         Supports dicts or lists of dicts for a service. Matches based on 'src' and 'tgt'."""
@@ -259,136 +259,136 @@ class DefsEngine:
         best_match = None
         best_score = -1
 
-        msg_src = base_info.get("src") if base_info else None
-        msg_tgt = base_info.get("tgt") if base_info else None
+        message_src = message_context.get("src") if message_context else None
+        message_tgt = message_context.get("tgt") if message_context else None
 
-        for cand in candidates:
+        for service_candidate in candidates:
             score = 0
-            cand_src = cand.get("src")
-            cand_tgt = cand.get("tgt")
+            candidate_src = service_candidate.get("src")
+            candidate_tgt = service_candidate.get("tgt")
 
-            if cand_src is not None:
-                cand_src_val = self._parse_int(cand_src)
-                if msg_src is not None and cand_src_val == msg_src:
+            if candidate_src is not None:
+                candidate_src_val = self._parse_int(candidate_src)
+                if message_src is not None and candidate_src_val == message_src:
                     score += 1
                 else:
                     continue  # strict mismatch
 
-            if cand_tgt is not None:
-                cand_tgt_val = self._parse_int(cand_tgt)
-                if msg_tgt is not None and cand_tgt_val == msg_tgt:
+            if candidate_tgt is not None:
+                candidate_tgt_val = self._parse_int(candidate_tgt)
+                if message_tgt is not None and candidate_tgt_val == message_tgt:
                     score += 1
                 else:
                     continue  # strict mismatch
 
             if score > best_score:
                 best_score = score
-                best_match = cand
+                best_match = service_candidate
 
         if best_match:
-            return best_match, best_match.get("name", f"CustomService_{hex_key}")
+            return best_match, best_match.get("name", f"UnknownService_{hex_key}")
 
         return None, None
 
-    def parse_payload(self, payload_bytes: bytes, base_info: dict[str, Any]) -> dict[str, Any] | None:
+    def parse_payload(self, payload_bytes: bytes, message_context: dict[str, Any]) -> dict[str, Any] | None:
         """Maps payload bytes to named parameters using JSON definitions."""
         if not self.defs or len(payload_bytes) < 1:
             return None
 
-        service_def, service_name = self.lookup(payload_bytes[0], base_info)
+        service_def, service_name = self.lookup(payload_bytes[0], message_context)
         if not service_def:
             return None
 
-        base_info["service_name"] = service_name
+        message_context["service_name"] = service_name
         args_layout = service_def.get("args") or {}
-        layout = args_layout.get(str(len(payload_bytes)), args_layout.get("default", []))
+        payload_layout = args_layout.get(str(len(payload_bytes)), args_layout.get("default", []))
 
-        params_dict = {}
-        offset = 1
-        layout_queue = list(layout)
+        decoded_params = {}
+        byte_offset = 1
+        pending_layout_items = list(payload_layout)
 
-        while layout_queue:
-            param = layout_queue.pop(0)
+        while pending_layout_items:
+            param_spec = pending_layout_items.pop(0)
 
-            if "mux" in param:
-                expanded = self._resolve_mux(param, params_dict)
-                if expanded:
-                    layout_queue = expanded + layout_queue
+            if "mux" in param_spec:
+                expanded_layout = self._resolve_mux(param_spec, decoded_params)
+                if expanded_layout:
+                    pending_layout_items = expanded_layout + pending_layout_items
                 continue
 
-            if offset >= len(payload_bytes):
+            if byte_offset >= len(payload_bytes):
                 break
 
-            name, value, offset = self._decode_param(param, payload_bytes, offset)
-            params_dict[name] = value
+            param_name, param_value, byte_offset = self._decode_param(param_spec, payload_bytes, byte_offset)
+            decoded_params[param_name] = param_value
 
-        if offset < len(payload_bytes):
-            params_dict["trailing_payload"] = payload_bytes[offset:]
+        if byte_offset < len(payload_bytes):
+            decoded_params["trailing_payload"] = payload_bytes[byte_offset:]
 
-        base_info["params"] = params_dict
-        return base_info
+        message_context["params"] = decoded_params
+        return message_context
 
     @staticmethod
-    def _resolve_mux(param, params_dict):
+    def _resolve_mux(param_spec, decoded_params):
         """Resolve a mux entry against already-parsed params. Returns the matched case list or None."""
-        switch_on = param.get("switch_on")
+        switch_on = param_spec.get("switch_on")
         if not switch_on:
             return None
-        prev_val = params_dict.get(switch_on)
-        if prev_val is None:
+        selector_value = decoded_params.get(switch_on)
+        if selector_value is None:
             return None
-        if isinstance(prev_val, dict):
-            int_val = prev_val.get("value")
-        elif isinstance(prev_val, int):
-            int_val = prev_val
-        elif isinstance(prev_val, (bytes, bytearray)):
-            int_val = int.from_bytes(prev_val, byteorder="big")
+        if isinstance(selector_value, dict):
+            selector_int = selector_value.get("value")
+        elif isinstance(selector_value, int):
+            selector_int = selector_value
+        elif isinstance(selector_value, (bytes, bytearray)):
+            selector_int = int.from_bytes(selector_value, byteorder="big")
         else:
             return None
-        cases = param["mux"]
+        cases = param_spec["mux"]
         matched = (
-            cases.get(f"0x{int_val:02X}")
-            or cases.get(str(int_val))
+            cases.get(f"0x{selector_int:02X}")
+            or cases.get(str(selector_int))
             or cases.get("default")
         )
         return matched if isinstance(matched, list) else None
 
     @staticmethod
-    def _decode_param(param, payload_bytes, offset):
-        """Read one parameter from payload_bytes at offset. Returns (name, value, new_offset)."""
-        p_name = param.get("name", "unknown")
-        p_len = param.get("length", 1)
+    def _decode_param(param_spec, payload_bytes, byte_offset):
+        """Read one parameter from payload_bytes at byte_offset. Returns (name, value, new_offset)."""
+        param_name = param_spec.get("name", "unknown")
+        param_len = param_spec.get("length", 1)
 
-        if p_len == -1:
-            raw_val = payload_bytes[offset:]
-            offset = len(payload_bytes)
+        if param_len == -1:
+            raw_val = payload_bytes[byte_offset:]
+            byte_offset = len(payload_bytes)
         else:
-            raw_val = payload_bytes[offset: offset + p_len]
-            offset += p_len
+            raw_val = payload_bytes[byte_offset: byte_offset + param_len]
+            byte_offset += param_len
 
-        if p_len <= 0 or p_len > 8:
-            return p_name, raw_val, offset
+        if param_len <= 0 or param_len > 8:
+            return param_name, raw_val, byte_offset
 
-        int_val = int.from_bytes(raw_val, byteorder="big")
-        named_val = DefsEngine._lookup_enum(param.get("enum", {}), int_val)
+        decoded_int = int.from_bytes(raw_val, byteorder="big")
+        named_val = DefsEngine._lookup_enum(param_spec.get("enum", {}), decoded_int)
 
         if named_val:
-            return p_name, {"value": int_val, "name": named_val}, offset
-        if p_len == 1:
-            return p_name, int_val, offset
-        return p_name, raw_val, offset
+            return param_name, {"value": decoded_int, "name": named_val}, byte_offset
+        if param_len == 1:
+            return param_name, decoded_int, byte_offset
+        return param_name, raw_val, byte_offset
 
     @staticmethod
-    def _lookup_enum(enum_map, int_val):
-        """Return the enum label for int_val, supporting exact and range keys. Returns None if not found."""
-        named = enum_map.get(f"0x{int_val:02X}") or enum_map.get(str(int_val))
+    def _lookup_enum(enum_map, enum_value):
+        """Return the enum label for enum_value, supporting exact and range keys. Returns None if not found."""
+        named = enum_map.get(f"0x{enum_value:02X}") or enum_map.get(str(enum_value))
         if named:
             return named
         for k, v in enum_map.items():
             if isinstance(k, str) and "-" in k:
                 try:
                     lo, hi = k.split("-", 1)
-                    if int(lo.strip(), 0) <= int_val <= int(hi.strip(), 0):
+                    if int(lo.strip(), 0) <= enum_value <= int(hi.strip(), 0):
                         return v
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
@@ -630,30 +630,30 @@ class KWPDecoder(ProtocolDecoder):
             return None
 
         try:
-            base_info = {
+            message_context = {
                 "src": isotp_msg.rx_id & 0xFF,
                 "tgt": isotp_msg.tgt_addr,
-                "service_hex": data[0],
+                "service_id": data[0],
                 "service_name": "",
                 "params": {},
             }
 
-            defs_info = self.defs.parse_payload(data, base_info)
-            if defs_info:
+            decoded_info = self.defs.parse_payload(data, message_context)
+            if decoded_info:
                 return KWPMessage(
                     isotp_msg=isotp_msg,
-                    service_hex=defs_info["service_hex"],
-                    service_name=defs_info["service_name"],
-                    params=defs_info["params"],
+                    service_id=decoded_info["service_id"],
+                    service_name=decoded_info["service_name"],
+                    params=decoded_info["params"],
                     scapy_pkt=None,
                 )
 
             # Scapy fallback
             scapy_pkt = KWP(data)
-            service_hex, service_name, params = self._decode_via_scapy(scapy_pkt, base_info)
+            service_id, service_name, params = self._decode_via_scapy(scapy_pkt, message_context)
             return KWPMessage(
                 isotp_msg=isotp_msg,
-                service_hex=service_hex,
+                service_id=service_id,
                 service_name=service_name,
                 params=params,
                 scapy_pkt=scapy_pkt,
@@ -665,26 +665,30 @@ class KWPDecoder(ProtocolDecoder):
             )
             return None
 
-    def _decode_via_scapy(self, kwp_pkt: Any, base_info: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
+    def _decode_via_scapy(self, kwp_pkt: Any, message_context: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
         """Extract service id, name, and params dict from a Scapy KWP packet."""
-        service_hex = kwp_pkt.fields.get("service", 0)
+        service_id = kwp_pkt.fields.get("service", 0)
         service_name = kwp_pkt.sprintf("%KWP.service%")
 
         if service_name.startswith("0x") or service_name.isdigit():
-            req_name = None
-            if isinstance(service_hex, int) and service_hex > 0x40:
-                req_id = service_hex - 0x40
-                _, req_name = self.defs.lookup(req_id, base_info)
-                if not req_name:
+            request_service_name = None
+            if isinstance(service_id, int) and service_id > 0x40:
+                request_service_id = service_id - 0x40
+                _, request_service_name = self.defs.lookup(request_service_id, message_context)
+                if not request_service_name:
                     try:
-                        candidate = KWP(bytes([req_id])).sprintf("%KWP.service%")
+                        candidate = KWP(bytes([request_service_id])).sprintf("%KWP.service%")
                         if not (candidate.startswith("0x") or candidate.isdigit()):
-                            req_name = candidate
+                            request_service_name = candidate
                     except Exception:  # pylint: disable=broad-exception-caught
                         pass
-            service_name = f"{req_name}PositiveResponse" if req_name else "<Unknown_Service>"
+            service_name = (
+                f"{request_service_name}PositiveResponse"
+                if request_service_name
+                else f"UnknownService_{service_id:02X}"
+            )
 
-        params = {}
+        decoded_params = {}
         if kwp_pkt.payload:
             for k, v in kwp_pkt.payload.fields.items():
                 if isinstance(v, int):
@@ -694,19 +698,19 @@ class KWPDecoder(ProtocolDecoder):
                         if repr_val.startswith("'") and repr_val.endswith("'"):
                             repr_val = repr_val[1:-1]
                         if repr_val and not repr_val.isdigit() and not repr_val.lower().startswith("0x"):
-                            params[k] = {"value": v, "name": repr_val}
+                            decoded_params[k] = {"value": v, "name": repr_val}
                         else:
-                            params[k] = v
+                            decoded_params[k] = v
                     else:
-                        params[k] = v
+                        decoded_params[k] = v
                 else:
-                    params[k] = v
+                    decoded_params[k] = v
             if kwp_pkt.haslayer(Raw):
                 raw_bytes = getattr(kwp_pkt.getlayer(Raw), "load", b"")
                 if raw_bytes:
-                    params["raw_payload" if not params else "trailing_payload"] = raw_bytes
+                    decoded_params["raw_payload" if not decoded_params else "trailing_payload"] = raw_bytes
 
-        return service_hex, service_name, params
+        return service_id, service_name, decoded_params
 
 
 # ---------------------------------------------------------------------------
@@ -803,19 +807,19 @@ class TraceAnalyzer:
 
     def analyze(self):
         """Open the data source and run the full protocol pipeline until exhausted."""
-        reader = self._open_source()
+        source_reader = self._open_source()
         self.reassembler.reset()
         self.can_count = self.isotp_count = self.protocol_count = 0
 
         try:
-            for raw_msg in reader:
-                if raw_msg.is_error_frame or raw_msg.is_remote_frame:
+            for can_message in source_reader:
+                if can_message.is_error_frame or can_message.is_remote_frame:
                     continue
 
                 #  CAN layer
-                direction = "Rx" if raw_msg.is_rx else "Tx"
+                direction = "Rx" if can_message.is_rx else "Tx"
                 can_frame = CANFrame(
-                    raw_msg.arbitration_id, raw_msg.data, raw_msg.timestamp, direction
+                    can_message.arbitration_id, can_message.data, can_message.timestamp, direction
                 )
 
                 if self.filter.should_drop(can_frame):
@@ -839,15 +843,15 @@ class TraceAnalyzer:
                 self.plugins.dispatch(isotp_msg)
 
                 #  Protocol layer
-                proto_msg = self.protocols.process(isotp_msg)
-                if not proto_msg:
+                protocol_msg = self.protocols.process(isotp_msg)
+                if not protocol_msg:
                     continue
 
-                if self.filter.should_drop(proto_msg):
+                if self.filter.should_drop(protocol_msg):
                     continue
 
                 self.protocol_count += 1
-                self.plugins.dispatch(proto_msg)
+                self.plugins.dispatch(protocol_msg)
 
         except KeyboardInterrupt:
             print("\nCapture interrupted by user.", file=sys.stderr)
@@ -984,7 +988,7 @@ def main():
     for path in pre_args.plugin:
         try:
             plugins.load(path)
-        except Exception as e:  # pylint: disable=broad-exception-caught
+        except Exception as e: 
             print(f"Failed to load plugin {path}: {e}", file=sys.stderr)
 
     arg_parser = setup_parser()
