@@ -509,6 +509,12 @@ class ISOTPReassembler:
             frame_entry=(timestamp, direction, arb_id, payload),
         )
 
+    @staticmethod
+    def _fmt_key(key: SessionKey) -> str:
+        if isinstance(key, tuple):
+            return f"(0x{key[0]:X}, 0x{key[1]:X})"
+        return f"0x{key:X}"
+
     def _evict_stale(self, timestamp: float):
         """Remove sessions that have exceeded the inactivity timeout."""
         if self.session_timeout <= 0:
@@ -516,6 +522,10 @@ class ISOTPReassembler:
         stale = [k for k, v in self._sessions.items()
                  if timestamp - v["started"] > self.session_timeout]
         for k in stale:
+            logging.getLogger("cdt.isotp").warning(
+                "Dropped ISOTP session on %s: timeout exceeded (expected %d bytes)",
+                self._fmt_key(k), self._sessions[k]['dl']
+            )
             del self._sessions[k]
 
     def _handle_sf(self, frame: _ISOTPFrame) -> ISOTPMessage | None:
@@ -536,6 +546,10 @@ class ISOTPReassembler:
         max_sf_dl = 7 if self.addressing == AddressingMode.STANDARD else 6
         if len(frame.isotp_payload) < 2:
             return
+        if frame.session_key in self._sessions:
+            logging.getLogger("cdt.isotp").warning(
+                "Dropped ISOTP session on %s: overwritten by new First Frame", self._fmt_key(frame.session_key)
+            )
         dl = ((frame.isotp_payload[0] & 0x0F) << 8) | frame.isotp_payload[1]
         if dl > max_sf_dl:
             self._sessions[frame.session_key] = {
@@ -549,10 +563,17 @@ class ISOTPReassembler:
     def _handle_cf(self, frame: _ISOTPFrame) -> ISOTPMessage | None:
         """Handle a Consecutive Frame (PCI=2). Returns ISOTPMessage on completion or None."""
         if frame.session_key not in self._sessions:
+            logging.getLogger("cdt.isotp").warning(
+                "Dropped ISOTP CF on %s: no active session (orphan CF)", self._fmt_key(frame.session_key)
+            )
             return None
         sess = self._sessions[frame.session_key]
         sn = frame.isotp_payload[0] & 0x0F
         if sn != sess["sn"]:
+            logging.getLogger("cdt.isotp").warning(
+                "Dropped ISOTP session on %s: sequence mismatch (expected %X, got %X)",
+                self._fmt_key(frame.session_key), sess["sn"], sn
+            )
             del self._sessions[frame.session_key]
             return None
         sess["data"].extend(frame.isotp_payload[1:])
