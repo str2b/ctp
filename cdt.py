@@ -6,6 +6,7 @@ import abc
 import argparse
 import importlib.util
 import json
+import logging
 import os
 import re
 import sys
@@ -168,12 +169,11 @@ class FilterEngine:
                 filter_def: dict[str, Any] = json.load(f)
             self.mode = filter_def.get("mode", "whitelist").lower()
             self.rules = filter_def.get("rules", [])
-            print(
-                f"Loaded {len(self.rules)} filter rules in {self.mode} mode.",
-                file=sys.stderr,
+            logging.getLogger("cdt.filter").info(
+                "Loaded %d filter rules in %s mode.", len(self.rules), self.mode,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(f"Failed to load filter file {filter_file}: {e}", file=sys.stderr)
+            logging.getLogger("cdt.filter").error("Failed to load filter file %s: %s", filter_file, e)
             sys.exit(1)
 
     def should_drop(self, message: Message) -> bool:
@@ -233,9 +233,9 @@ class DefsEngine:
         try:
             with open(defs_file, "r", encoding="utf-8") as f:
                 self.defs = json.load(f)
-            print(f"Loaded custom definitions from {defs_file}", file=sys.stderr)
+            logging.getLogger("cdt.defs").info("Loaded custom definitions from %s", defs_file)
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(f"Failed to load defs file {defs_file}: {e}", file=sys.stderr)
+            logging.getLogger("cdt.defs").error("Failed to load defs file %s: %s", defs_file, e)
 
     @staticmethod
     def _parse_int(value: str | int) -> int:
@@ -659,9 +659,8 @@ class KWPDecoder(ProtocolDecoder):
                 scapy_pkt=scapy_pkt,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(
-                f"Error decoding KWP 0x{data[0]:02X} on 0x{isotp_msg.rx_id:X}: {e}",
-                file=sys.stderr,
+            logging.getLogger("cdt.kwp").debug(
+                "Error decoding KWP 0x%02X on 0x%X: %s", data[0], isotp_msg.rx_id, e,
             )
             return None
 
@@ -741,7 +740,7 @@ class PluginRegistry:
         sys.modules[name] = mod
         spec.loader.exec_module(mod)
         self._plugins.append(mod)
-        print(f"Loaded plugin: {path}", file=sys.stderr)
+        logging.getLogger("cdt.plugins").info("Loaded plugin: %s", path)
         return self
 
     def add_arguments(self, parser: argparse.ArgumentParser):
@@ -857,21 +856,19 @@ class TraceAnalyzer:
                 self.plugins.dispatch(protocol_msg)
 
         except KeyboardInterrupt:
-            print("\nCapture interrupted by user.", file=sys.stderr)
+            logging.getLogger("cdt.analyzer").info("Capture interrupted by user.")
 
-        print(
-            f"Processed {self.can_count} CAN frames,"
-            f" yielding {self.isotp_count} ISOTPs and {self.protocol_count} protocol messages (after filtering).",
-            file=sys.stderr,
+        logging.getLogger("cdt.analyzer").info(
+            "Processed %d CAN frames, yielding %d ISOTPs and %d protocol messages (after filtering).",
+            self.can_count, self.isotp_count, self.protocol_count,
         )
 
     def _open_source(self) -> can.Bus | can.ASCReader | can.BLFReader:
         """Open and return a CAN message iterator (live bus or trace file reader)."""
         if self.config.interface:
-            print(
-                f"Opening LIVE interface '{self.config.interface}'"
-                f" on channel '{self.config.channel}'...",
-                file=sys.stderr,
+            logging.getLogger("cdt.analyzer").info(
+                "Opening LIVE interface '%s' on channel '%s'...",
+                self.config.interface, self.config.channel,
             )
             kwargs = {"interface": self.config.interface, "channel": self.config.channel}
             if self.config.bitrate:
@@ -893,9 +890,9 @@ class TraceAnalyzer:
                 f"Unsupported trace format: {ext}. Supported: {', '.join(reader_map.keys())}"
             )
 
-        print(
-            f"Reading {self.config.trace_file} (format: {ext[1:].upper()}) in real-time streaming mode...",
-            file=sys.stderr,
+        logging.getLogger("cdt.analyzer").info(
+            "Reading %s (format: %s) in real-time streaming mode...",
+            self.config.trace_file, ext[1:].upper(),
         )
         return reader_map[ext](self.config.trace_file)
 
@@ -981,6 +978,12 @@ def _add_plugin_argument(parser: argparse.ArgumentParser):
 
 def main():
     """Build the plugin registry, parse arguments, assemble the pipeline, and run."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(name)s] %(message)s",
+        stream=sys.stderr,
+    )
+
     # Pre-parse to discover plugins before the main parser enforces required args.
     # Plugins may call add_arguments() to register their own flags.
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -992,7 +995,7 @@ def main():
         try:
             plugins.load(path)
         except Exception as e: 
-            print(f"Failed to load plugin {path}: {e}", file=sys.stderr)
+            logging.getLogger("cdt.plugins").error("Failed to load plugin %s: %s", path, e)
 
     arg_parser = setup_parser()
     plugins.add_arguments(arg_parser)
@@ -1011,7 +1014,7 @@ def main():
     if "kwp" in args.protocols:
         protocols.register(KWPDecoder(DefsEngine(args.defs)))
     if "uds" in args.protocols:
-        print("UDS decoder not yet implemented.", file=sys.stderr)
+        logging.getLogger("cdt").warning("UDS decoder not yet implemented.")
 
     plugins.init(args)
 

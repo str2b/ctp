@@ -12,7 +12,10 @@ Plugin API implemented:
   teardown()                    restore stdout and close output file if redirected
 """
 
+import logging
 import sys
+
+log = logging.getLogger("cdt.plugins.trace_printer")
 
 try:
     from scapy.contrib.automotive.bmw.definitions import (
@@ -42,7 +45,9 @@ def add_arguments(parser):
         help="[trace_printer] Which layers to print output for (default: kwp)",
     )
     parser.add_argument(
-        "-o", "--output", help="[trace_printer] Optional file to redirect stdout to natively."
+        "-o",
+        "--output",
+        help="[trace_printer] Optional file to redirect stdout to natively.",
     )
 
 
@@ -56,6 +61,9 @@ def init(args):
             args.output, "w", encoding="utf-8"
         )  # pylint: disable=consider-using-with
         sys.stdout = _state["out_file"]
+        log.info("Output redirected to %s", args.output)
+
+    log.info("Printing layers: %s", ", ".join(_state["print_layers"]))
 
 
 def teardown():
