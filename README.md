@@ -201,6 +201,49 @@ A plugin for generic KWP traces.
 - --print: Layers to output (can, isotp, kwp).
 - -o, --output: Redirect output to a file.
 
+## Plugin: srec_dumper.py
+A plugin that writes decoded memory transfer traffic to Motorola SREC files using hexrec.
+
+Requirement:
+- Must be used with `-d/--defs` so memory fields are decoded deterministically.
+- The plugin exits with an error if `--defs` is missing.
+
+### Captured KWP services
+- ReadMemoryByAddress (request/positive response)
+- WriteMemoryByAddress (request/positive response)
+- RequestDownload + TransferData + RequestTransferExit (download session)
+- RequestUpload + TransferData + RequestTransferExit (upload session)
+
+### Arguments
+- --srec-output DIR: Output directory for generated SREC files.
+- --srec-prefix PREFIX: Prefix used for generated filenames (default: dump).
+- --srec-gap BYTES: Max allowed address gap inside one read/write session before splitting into a new file (default: 256).
+
+### Output naming
+- \<prefix\>\_sNNNN\_read\_\<START\>\_\<END\>.srec
+- \<prefix\>\_sNNNN\_write\_\<START\>\_\<END\>.srec
+- \<prefix\>\_sNNNN\_dl\_\<START\>\_\<END\>.srec
+- \<prefix\>\_sNNNN\_ul\_\<START\>\_\<END\>.srec
+
+Notes:
+- START and END are hexadecimal memory boundaries written in each file.
+- The sequence number is global and increases across all dump kinds (read/write/dl/ul).
+- Read/write captures are split into sessions when address continuity breaks (backward jump or gap larger than --srec-gap).
+- Download/upload captures are session-based and terminate at RequestTransferExit.
+- Data is only committed when the corresponding positive response is observed.
+
+### Required defs fields
+
+The plugin uses three canonical parameter names across all services.
+The `--defs` JSON must produce these field names in `msg.params` for the plugin to capture data.
+Missing fields cause the corresponding request to be silently skipped.
+
+| Field | Type | Used by |
+|---|---|---|
+| `memoryAddress` | bytes or int | 0x23, 0x3D, 0x34, 0x35 - target/base address |
+| `memorySize` | bytes or int | 0x23, 0x34, 0x35 - transfer size (informational for downloads/uploads) |
+| `dataRecord` | bytes | 0x63, 0x3D, 0x36 - data payload (falls back to `raw_payload`) |
+
 
 ## Examples
 

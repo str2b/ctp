@@ -323,7 +323,7 @@ class DefsEngine:
             decoded_params[param_name] = param_value
 
         if byte_offset < len(payload_bytes):
-            decoded_params["trailing_payload"] = payload_bytes[byte_offset:]
+            decoded_params["raw_payload"] = payload_bytes[byte_offset:]
 
         message_context["params"] = decoded_params
         return message_context
@@ -707,7 +707,7 @@ class KWPDecoder(ProtocolDecoder):
             if kwp_pkt.haslayer(Raw):
                 raw_bytes = getattr(kwp_pkt.getlayer(Raw), "load", b"")
                 if raw_bytes:
-                    decoded_params["raw_payload" if not decoded_params else "trailing_payload"] = raw_bytes
+                    decoded_params["raw_payload"] = raw_bytes
 
         return service_id, service_name, decoded_params
 
