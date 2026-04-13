@@ -735,7 +735,10 @@ class PluginRegistry:
         abs_path = os.path.abspath(path)
         name = f"cdt_plugin_{len(self._plugins)}"
         spec = importlib.util.spec_from_file_location(name, abs_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not create module spec for plugin: {path}")
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
         spec.loader.exec_module(mod)
         self._plugins.append(mod)
         print(f"Loaded plugin: {path}", file=sys.stderr)
