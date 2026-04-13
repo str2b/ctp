@@ -524,7 +524,7 @@ def teardown() -> None:
             continue
         try:
             path, nb = writer.write(session)
-            log.info("Wrote %s  (%d bytes, %d block(s))", path, nb, len(session.chunks))
+            log.info("Wrote %s  (%d bytes)", path, nb)
             n += 1
         except Exception as exc:  # pylint: disable=broad-exception-caught
             log.error("seq=%d: %s", session.seq, exc)
